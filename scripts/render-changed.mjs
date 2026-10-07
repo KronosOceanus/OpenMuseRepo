@@ -19,7 +19,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join, resolve } from 'node:path'
-import { scoreDiff, measureSpans } from './score-diff.mjs'
+import { scoreDiff, filterMeasures } from './score-diff.mjs'
 
 /** 在几个常见位置找 MuseScore 可执行文件。CI 上一般在 PATH 里。 */
 export function findMuseScore() {
@@ -42,28 +42,8 @@ export function findMuseScore() {
   return null
 }
 
-/**
- * 生成一份「只含指定小节」的乐谱。
- *
- * ⚠️ 踩过的坑：**必须按「小节序号」筛，而不是按 (谱表, 序号)。**
- *     一个小节是**跨所有谱表的纵向切片** —— 第 21 小节意味着每个谱表的
- *     第 21 小节。只留「谱表1 的第 21 小节」会把谱表2 变成零小节，
- *     MuseScore 直接拒收（实测：--score-meta 无输出）。
- *
- * @param xml   原始 .mscx 文本（已剥 eid）
- * @param keep  改动清单 [{staff, index}]，只取其中的 index
- */
-export function filterMeasures(xml, keep) {
-  const wanted = new Set(keep.map((k) => Number(k.index)))
-  const spans = measureSpans(xml)
-  const doomed = spans.filter((s) => !wanted.has(s.index))
-
-  // 从后往前删，避免偏移量失效
-  const ranges = doomed.map((s) => [s.start, s.end]).sort((a, b) => b[0] - a[0])
-  let out = xml
-  for (const [start, end] of ranges) out = out.slice(0, start) + out.slice(end)
-  return out
-}
+// filterMeasures 在 score-diff.mjs 里 —— 渲染和对照谱共用同一套小节定位逻辑，
+// 放两处迟早会漂移。
 
 /** 用 MuseScore CLI 把一份乐谱导出成指定格式。 */
 export function exportScore(mscoreBin, scorePath, outPath, extraArgs = []) {
