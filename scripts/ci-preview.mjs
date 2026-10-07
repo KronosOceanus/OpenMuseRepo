@@ -187,7 +187,7 @@ for (const { name, path: headPath } of headScores) {
     try {
       png = exportPng(bin, cmpPath, join(pieceOut, `compare-${n}.png`))
     } catch (e) {
-      report.push(`_渲染失败：${String(e.message).slice(0, 80)}_`, '')
+      report.push(`_渲染失败：${String(e.message).slice(0, 300)}_`, '')
       continue
     }
     if (!png) {
@@ -229,7 +229,7 @@ for (const { name, path: headPath } of headScores) {
           }
         }
       } catch (e) {
-        console.error(`[跳过声音] 第 ${n} 段：${String(e.message).split('\n')[0]}`)
+        console.error(`[跳过声音] 第 ${n} 段：\n${String(e.message)}`)
       }
     }
 

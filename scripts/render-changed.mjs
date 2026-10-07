@@ -45,13 +45,36 @@ export function findMuseScore() {
 // filterMeasures 在 score-diff.mjs 里 —— 渲染和对照谱共用同一套小节定位逻辑，
 // 放两处迟早会漂移。
 
-/** 用 MuseScore CLI 把一份乐谱导出成指定格式。 */
+/**
+ * 用 MuseScore CLI 把一份乐谱导出成指定格式。
+ *
+ * ⚠️ 两种失败要分开报：
+ *   ① 进程非零退出 → 把 MuseScore 自己的 stderr 末尾带出来
+ *   ② 进程退出码 0 但没产出文件 → 这只说"没产出"没用，也得带上 stderr
+ *      （MuseScore 有些失败是静默的，比如找不到音源）
+ * 不这么做的话，上层只能知道"没导出 mp3"，不知道该往哪查。
+ */
 export function exportScore(mscoreBin, scorePath, outPath, extraArgs = []) {
-  execFileSync(mscoreBin, ['-o', outPath, ...extraArgs, scorePath], {
-    stdio: 'pipe',
-    timeout: 300000,
-  })
-  return existsSync(outPath)
+  let stderr = ''
+  let failed = null
+  try {
+    execFileSync(mscoreBin, ['-o', outPath, ...extraArgs, scorePath], { stdio: 'pipe', timeout: 300000 })
+  } catch (e) {
+    stderr = (e.stderr?.toString() || '').trim()
+    failed = e
+  }
+
+  if (failed) {
+    const tail = stderr ? stderr.split('\n').slice(-10).join('\n') : String(failed.message)
+    throw new Error(`MuseScore 非零退出：${tail}`)
+  }
+
+  if (!existsSync(outPath)) {
+    const tail = stderr ? stderr.split('\n').slice(-10).join('\n') : '（stderr 为空）'
+    throw new Error(`MuseScore 退出码 0 但没产出 ${outPath}；stderr 末尾：${tail}`)
+  }
+
+  return true
 }
 
 /**
