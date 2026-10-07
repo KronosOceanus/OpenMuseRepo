@@ -260,7 +260,7 @@ jobs:
 
           echo "=== 收集附件 ==="
           ARGS=()
-          while IFS= read -r f; do
+          while IFS= read -r f || [ -n "$f" ]; do
             if [ -n "$f" ] && [ -f "$f" ]; then
               ARGS+=(--attach "$f")
               echo "  $f"

@@ -247,8 +247,12 @@ if (!anyChange) {
 const reportPath = join(outDir, 'report.md')
 writeFileSync(reportPath, report.join('\n'), 'utf8')
 
-// 附件清单单独写一份 —— 工作流的 gh --attach 直接读它，免得在 YAML 里拼数组
-writeFileSync(join(outDir, 'attachments.txt'), attachments.join('\n'), 'utf8')
+// 附件清单单独写一份 —— 工作流的 gh --attach 直接读它，免得在 YAML 里拼数组。
+//
+// ⚠️ 末尾必须有换行符。`while read` 遇到「最后一行没有 \n」时返回非零、
+//    循环体不执行 —— 那一行会被悄悄吃掉。实测过：6 个附件只读到 5 个，
+//    最后一段的 MP4 根本没被 --attach 上去。
+writeFileSync(join(outDir, 'attachments.txt'), attachments.length ? attachments.join('\n') + '\n' : '', 'utf8')
 
 console.log(`\n报告已写出：${reportPath}`)
 console.log(`附件 ${attachments.length} 个：`)
