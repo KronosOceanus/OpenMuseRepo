@@ -14,6 +14,11 @@ import { join, basename, extname } from 'node:path'
 import { stripEids, readScoreText, summarize } from './normalize.mjs'
 import { parseScore } from './score-diff.mjs'
 
+// 纯 CLI，不导出任何东西。被 import 时直接报错，别让 process.exit 杀掉调用方。
+if (!(process.argv[1] && import.meta.url === `file://${process.argv[1]}`)) {
+  throw new Error('import-score.mjs 是 CLI 脚本，不支持被 import')
+}
+
 const args = process.argv.slice(2)
 const noSource = args.includes('--no-source')
 const positional = args.filter((a) => !a.startsWith('--'))

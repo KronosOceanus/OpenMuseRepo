@@ -121,6 +121,29 @@ export function measureSpans(xml) {
   return spans
 }
 
+/**
+ * 生成一份「只含指定小节」的乐谱。
+ *
+ * ⚠️ 踩过的坑：**必须按「小节序号」筛，而不是按 (谱表, 序号)。**
+ *     一个小节是**跨所有谱表的纵向切片** —— 第 21 小节意味着每个谱表的
+ *     第 21 小节。只留「谱表1 的第 21 小节」会把谱表2 变成零小节，
+ *     MuseScore 直接拒收（实测：--score-meta 无输出）。
+ *
+ * @param {string} xml .mscx 文本（已剥 eid）
+ * @param {Iterable<number|{index:number}>} keep 要保留的小节序号
+ */
+export function filterMeasures(xml, keep) {
+  const wanted = new Set([...keep].map((k) => Number(typeof k === 'object' && k !== null ? k.index : k)))
+  const doomed = measureSpans(xml)
+    .filter((s) => !wanted.has(s.index))
+    .map((s) => [s.start, s.end])
+    .sort((a, b) => b[0] - a[0]) // 从后往前删，避免偏移量失效
+
+  let out = xml
+  for (const [start, end] of doomed) out = out.slice(0, start) + out.slice(end)
+  return out
+}
+
 /** 逐行比较两个小节，返回差异（只保留有意义的变化）。 */
 function diffMeasure(a, b) {
   const la = a.split('\n').map((s) => s.trim()).filter(Boolean)
