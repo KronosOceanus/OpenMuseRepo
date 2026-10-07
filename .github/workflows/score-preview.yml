@@ -209,10 +209,39 @@ jobs:
           fi
 
       - name: 生成对照
-        # --link-prefix out 让报告正文里写成 `out/神话2/compare-1-1.png`。
-        # 这样下面的 `gh pr comment --attach out/...` 能把正文里的路径
-        # **原地改写成上传后的 URL** —— 图片和视频才能在评论里内联显示。
-        run: node scripts/ci-preview.mjs --base-dir _base --out out --link-prefix out
+        id: gen
+        #
+        # 两种模式，看有没有配 OPENMUSE_PAT 这个 secret：
+        #
+        #   attach   —— 有 PAT。正文里写本地路径（--link-prefix out），
+        #               下面用 `gh pr comment --attach` 上传并原地改写成
+        #               附件 URL。图片内联 + 视频变播放器。
+        #
+        #   previews —— 没有 PAT。退回「推到 previews 分支 + raw URL」，
+        #               图片能内联，但视频不行（raw mp4 不会渲染成播放器）。
+        #
+        # ⚠️ 为什么 attach 模式不能用 Actions 自带的 GITHUB_TOKEN：
+        #    GITHUB_TOKEN 是 GitHub App 的 installation token（服务器间令牌），
+        #    而 gh --attach 只认 user 类型的令牌（gho_ / ghp_ / github_pat_）。
+        #    用 GITHUB_TOKEN 会直接报 "unsupported authentication type"。
+        env:
+          PAT: ${{ secrets.OPENMUSE_PAT }}
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          if [ -n "$PAT" ]; then
+            echo "模式：attach（有 OPENMUSE_PAT）"
+            echo "mode=attach" >> "$GITHUB_OUTPUT"
+            node scripts/ci-preview.mjs --base-dir _base --out out --link-prefix out
+          elif [ -n "$PR" ]; then
+            BASE="https://raw.githubusercontent.com/${{ github.repository }}/previews/pr-$PR"
+            echo "模式：previews（没配 OPENMUSE_PAT）→ $BASE"
+            echo "mode=previews" >> "$GITHUB_OUTPUT"
+            node scripts/ci-preview.mjs --base-dir _base --out out --image-base "$BASE"
+          else
+            echo "模式：无（不是 PR）"
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            node scripts/ci-preview.mjs --base-dir _base --out out
+          fi
 
       - name: 上传产出
         uses: actions/upload-artifact@v4
@@ -222,7 +251,45 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - name: 贴回 PR
+      - name: 发布预览到 previews 分支（没有 PAT 时的退路）
+        if: github.event_name == 'pull_request' && steps.gen.outputs.mode == 'previews'
+        continue-on-error: true
+        run: |
+          set -e
+          PR="${{ github.event.pull_request.number }}"
+
+          # 先把产出挪出工作区 —— 下面切分支会把工作区换掉
+          rm -rf /tmp/preview-stash && mkdir -p /tmp/preview-stash
+          cp -r out/. /tmp/preview-stash/
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin previews >/dev/null 2>&1; then
+            git fetch --depth=1 origin previews
+            git checkout -B previews FETCH_HEAD
+          else
+            echo "previews 分支还不存在，新建孤儿分支"
+            git checkout --orphan previews
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          rm -rf "pr-$PR"
+          mkdir -p "pr-$PR"
+          cp -r /tmp/preview-stash/. "pr-$PR/"
+          printf 'out/\n' > .gitignore
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "（内容没变，不提交）"
+          else
+            git commit -m "预览 pr-$PR"
+            git push -f origin previews
+          fi
+
+          rm -rf out && mkdir -p out && cp -r /tmp/preview-stash/. out/
+
+      - name: 贴回 PR（PAT + gh --attach）
         #
         # ⚠️ 为什么用 gh 而不是 REST API：
         #
@@ -231,14 +298,14 @@ jobs:
         #   把文件传到 GitHub 的附件存储，并**原地改写正文里的本地路径**
         #   成上传后的 URL，于是图片内联、视频变成播放器。
         #
-        #   REST API 没有上传附件的接口，所以这件事只能靠 gh。
+        #   REST API 没有上传附件的接口，所以这件事只能靠 gh + PAT。
         #
         #   代价：gh pr comment 只能新建评论、不能改已有的。所以先删掉上一次
         #   那条（认 marker），再发新的 —— 这样 PR 里始终只有一条预览评论。
         #
-        if: github.event_name == 'pull_request' && hashFiles('out/report.md') != ''
+        if: github.event_name == 'pull_request' && steps.gen.outputs.mode == 'attach' && hashFiles('out/report.md') != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.OPENMUSE_PAT }}
         run: |
           set -e
           PR="${{ github.event.pull_request.number }}"
@@ -267,10 +334,38 @@ jobs:
             fi
           done < out/attachments.txt
 
-          if [ ${#ARGS[@]} -eq 0 ]; then
-            echo "没有附件，用 API 发纯文本评论"
-            gh pr comment "$PR" --body-file /tmp/body.md
-          else
-            echo "共 ${#ARGS[@]} 个 --attach 参数"
-            gh pr comment "$PR" --body-file /tmp/body.md "${ARGS[@]}"
-          fi
+          COUNT=$(( ${#ARGS[@]} / 2 ))
+          echo "共 $COUNT 个附件"
+          gh pr comment "$PR" --body-file /tmp/body.md "${ARGS[@]}"
+
+      - name: 贴回 PR（没有 PAT，退回 REST API）
+        if: |
+          github.event_name == 'pull_request'
+          && steps.gen.outputs.mode != 'attach'
+          && hashFiles('out/report.md') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const marker = '<!-- openmuse-preview -->'
+            const body = fs.readFileSync('out/report.md', 'utf8')
+            const full = marker + '\n' + body
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const mine = comments.find(c => c.body?.includes(marker))
+
+            if (mine) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: mine.id, body: full,
+              })
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body: full,
+              })
+            }
