@@ -71,24 +71,35 @@ jobs:
         with:
           node-version: '22'
 
-      - name: 装 MuseScore 4（AppImage）+ Xvfb
-        id: mscore
-        # ⚠️ 关键：MuseScore 只是"锦上添花"（出图和音频），
-        #    文字 diff 不需要它。装不上不该让整个 PR 显示为失败。
-        #    这个坑踩过：原来没有 continue-on-error，AppImage 下错了
-        #    就直接把 CI 弄红，看不出真正原因。
+      # ── MuseScore 拆成四步 ────────────────────────────────────────
+      #
+      # 原来是一大坨，失败时看不出卡在哪。拆开之后日志直接告诉你哪一步挂了。
+      # 每步都 continue-on-error：MuseScore 只是"锦上添花"（出图和音频），
+      # 文字 diff 不需要它 —— 装不上不该让整个 PR 变红。
+      #
+      # ⚠️ 已知坑：https://musescore.org/en/download/musescore-x86_64.AppImage
+      #    返回的是 **HTML 跳转页**（content-type: text/html），不是文件。
+      #    直接 curl 会下到 25 KB 的 HTML，chmod +x 也照样成功，
+      #    直到 --appimage-extract 才失败 —— 报错完全看不出原因。
+      #    真地址要从那个页面里解析。
+      #
+      # ⚠️ Ubuntu 24.04 的 apt 里只有 musescore(2.3.2) / musescore3(3.2.3)，
+      #    而 MuseScore 4 存的 .mscx 是 version 4.50/4.60，**v3 打不开**。
+      #    官方 PPA 在 noble 上也只有 2.3.2。所以只能用 v4 的 AppImage。
+
+      - name: MuseScore ① 装 Xvfb
         continue-on-error: true
         run: |
-          set -euo pipefail
-
+          set -x
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb || true
+          # xauth 是 xvfb-run 的运行时依赖，不显式装有时会缺
+          sudo apt-get install -y -qq xvfb xauth
+          which xvfb-run Xvfb xauth
 
-          # ⚠️ 坑：https://musescore.org/en/download/musescore-x86_64.AppImage
-          #    返回的是 **HTML 跳转页**，不是文件（content-type: text/html）。
-          #    直接 curl 会下到 25 KB 的 HTML，chmod +x 也照样成功，
-          #    直到 --appimage-extract 才失败 —— 报错完全看不出原因。
-          #    真地址要从那个页面里解析出来。
+      - name: MuseScore ② 下载 AppImage
+        continue-on-error: true
+        run: |
+          set -x
           JUMP="https://musescore.org/en/download/musescore-x86_64.AppImage"
           URL=$(curl -sL --max-time 60 "$JUMP" 2>/dev/null \
                 | grep -oE 'https://github\.com/musescore/MuseScore/releases/download/[^"'"'"' <>]+x86_64\.AppImage' \
@@ -98,32 +109,42 @@ jobs:
             echo "::warning::解析不到最新 AppImage 地址，用兜底的固定版本"
             URL="https://github.com/musescore/MuseScore/releases/download/v4.7.5/MuseScore-Studio-4.7.5.260831071-x86_64.AppImage"
           fi
-          echo "AppImage：$URL"
+          echo "AppImage 地址：$URL"
 
-          curl -L --max-time 600 -o /tmp/MuseScore.AppImage "$URL"
+          curl -L --retry 3 --retry-delay 5 --max-time 900 -o /tmp/MuseScore.AppImage "$URL"
+          ls -la /tmp/MuseScore.AppImage
 
           # 校验必须是 ELF。这一条能直接抓住"下到 HTML"的情况。
           MAGIC=$(head -c 4 /tmp/MuseScore.AppImage | od -An -tx1 | tr -d ' \n')
+          echo "前 4 字节：$MAGIC"
           if [ "$MAGIC" != "7f454c46" ]; then
             echo "::error::下载到的不是 AppImage（前 4 字节 $MAGIC，应为 7f454c46）"
             head -c 300 /tmp/MuseScore.AppImage
             exit 1
           fi
-          echo "大小：$(stat -c %s /tmp/MuseScore.AppImage) 字节"
 
+      - name: MuseScore ③ 解包并装 mscore
+        continue-on-error: true
+        run: |
+          set -x
           chmod +x /tmp/MuseScore.AppImage
           cd /tmp
-          /tmp/MuseScore.AppImage --appimage-extract > /dev/null
-          test -f /tmp/squashfs-root/AppRun
+          /tmp/MuseScore.AppImage --appimage-extract
+          ls -la /tmp/squashfs-root/AppRun
 
-          # 包装成 PATH 上的 mscore —— 这样本地和 CI 用同一个名字，
+          # 包装成 PATH 上的 mscore —— 本地和 CI 用同一个名字，
           # ci-preview.mjs 的 findMuseScore() 按名字找得到。
           sudo tee /usr/local/bin/mscore > /dev/null <<'WRAP'
           #!/bin/sh
           exec xvfb-run -a /tmp/squashfs-root/AppRun "$@"
           WRAP
           sudo chmod +x /usr/local/bin/mscore
+          cat /usr/local/bin/mscore
 
+      - name: MuseScore ④ 自检
+        continue-on-error: true
+        run: |
+          set -x
           mscore --version
 
       - name: 确认 MuseScore 可用性
