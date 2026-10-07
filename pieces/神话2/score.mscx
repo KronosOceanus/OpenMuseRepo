@@ -345,7 +345,7 @@
             <durationType>quarter</durationType>
             <Note>
               <eid/>
-              <pitch>72</pitch>
+              <pitch>71</pitch>
               <tpc>14</tpc>
               </Note>
             <Note>
@@ -1187,7 +1187,7 @@
             <durationType>quarter</durationType>
             <Note>
               <eid/>
-              <pitch>74</pitch>
+              <pitch>73</pitch>
               <tpc>19</tpc>
               </Note>
             </Chord>
@@ -2052,7 +2052,7 @@
             <durationType>quarter</durationType>
             <Note>
               <eid/>
-              <pitch>74</pitch>
+              <pitch>73</pitch>
               <tpc>16</tpc>
               </Note>
             </Chord>
@@ -2093,7 +2093,7 @@
             <durationType>quarter</durationType>
             <Note>
               <eid/>
-              <pitch>71</pitch>
+              <pitch>70</pitch>
               <tpc>19</tpc>
               </Note>
             </Chord>
