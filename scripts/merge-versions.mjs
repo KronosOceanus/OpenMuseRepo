@@ -129,11 +129,15 @@ function clonePart(part, newPartId, staffMap) {
  * 合并两个版本。
  * @param {string} xmlA 版本 A（基座，保留它的乐谱级设置）
  * @param {string} xmlB 版本 B（谱表接在后面）
- * @param {{labelA?:string, labelB?:string}} opts 两组谱表在谱面上的显示名
+ * @param {{labelA?:string, labelB?:string, shortA?:string, shortB?:string}} opts
+ *        显示名。longName 只出现在第一个系统，后续系统用 shortName ——
+ *        所以 short 也要给有意义的字，否则第二页起就只剩「A」「B」看不懂。
  */
 export function mergeVersions(xmlA, xmlB, opts = {}) {
   const labelA = opts.labelA ?? '原版'
   const labelB = opts.labelB ?? '改后'
+  const shortA = opts.shortA ?? '原'
+  const shortB = opts.shortB ?? '改'
 
   const A = dissect(xmlA)
   const B = dissect(xmlB)
@@ -158,11 +162,11 @@ export function mergeVersions(xmlA, xmlB, opts = {}) {
   const newPartId = String((allPartIds.length ? Math.max(...allPartIds) : 0) + 1)
 
   // B 的 Part 用 A 的第一个 Part 当模板（保留乐器设置），再改名
-  const bPart = relabelPart(clonePart(A.parts[0], newPartId, staffMap), labelB, 'B')
+  const bPart = relabelPart(clonePart(A.parts[0], newPartId, staffMap), labelB, shortB)
 
   const IND = '\n    '
   const partsXml =
-    A.parts.map((p) => IND + relabelPart(p.text, labelA, 'A')).join('') + IND + bPart
+    A.parts.map((p) => IND + relabelPart(p.text, labelA, shortA)).join('') + IND + bPart
   const musicXml =
     A.staves.map((s) => IND + s.text).join('') + B.staves.map((s) => IND + renumberStaffIds(s.text, staffMap)).join('')
 

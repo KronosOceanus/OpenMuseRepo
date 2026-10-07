@@ -71,9 +71,41 @@ MuseScore 的 CLI 只能整份导出（`--page` 能筛页，不能筛小节）�
 实现上是纯结构操作，不碰任何格式语义：
 1. 复制一份 `<Part>` 声明给版本 B
 2. 把 B 的音乐 `<Staff>` 接在后面，**id 重编号**
-3. 改掉两边的 `<longName>` / `<trackName>`，谱面上显示「原版」「改后」
+3. 改掉两边的 `<longName>` / `<shortName>` / `<trackName>`，谱面上显示「原版 40–41」「改后 40–41」
 
-**所以 PR 报告的头条是一张对照谱图**，文字 diff 退到折叠块里。
+### 按「连续段」切分
+
+最初的实现是把**所有**改动的小节筛出来拼成一份对照谱。实测（改了 5,6,7,8, 20,21,22, 40,41）发现三个问题：
+
+| 问题 | 表现 |
+|---|---|
+| **非连续小节被首尾拼在一起** | 读起来像一段连贯的音乐 —— **这是误导** |
+| **分页把上下对照劈开** | 跨页之后「上原版 / 下改后」的对应关系就断了 |
+| **显示名退化** | `longName` 只在第一个系统用，后续系统只剩简称 |
+
+所以改成**按连续段切**：
+
+```
+改动 5,6,7,8, 20,21,22, 40,41
+        ↓
+第 5–8 小节  → compare-1.mscx + compare-1.png
+第 20–22 小节 → compare-2.mscx + compare-2.png
+第 40–41 小节 → compare-3.mscx + compare-3.png
+```
+
+四件事一起解决：每段内部连续、每张图都很短（一页装得下）、标签自带小节范围、
+改动多的时候是一列小图而不是一张长图。
+
+两条保险：
+- **单段超过 8 小节**就再切一刀（`--max-per-run`）
+- **段数超过 6** 就只渲染前 6 段（`--max-runs`），剩下的写一句说明
+
+**所以 PR 报告是「改动 N 小节 → M 张对照图」**，文字 diff 退到折叠块里。
+
+> ⚠️ **已知瑕疵：图里上下两组的间距偏大。**
+> 原因是 `.mscx` **带不了页面布局** —— 页面样式在 `.mscz` 里的 `score_style.mss`，
+> 往 `.mscx` 塞 `<Style>` 块会被 MuseScore 忽略（三种位置和单位都试过）。
+> 所以渲染出来是 A4 版式，内容少的时候留白多。图仍然可读，只是不够紧凑。
 
 ---
 
@@ -82,11 +114,19 @@ MuseScore 的 CLI 只能整份导出（`--page` 能筛页，不能筛小节）�
 ### 生成对照谱（推荐）
 
 ```bash
-node scripts/compare.mjs 原版.mscx 改后.mscx out/compare.mscx
+node scripts/compare.mjs 原版.mscx 改后.mscx out/ --labels 原版,改后
 ```
 
-产出的 `.mscx` 用 MuseScore 打开（或渲染成图）就是上面那种并排对照 ——
-**只含改动过的小节**，不是整份。
+输出是**一个目录**，里面按连续段分成 `compare-1.mscx`、`compare-2.mscx`…
+每份都是「上半原版、下半改后」，而且**只含那一段的小节**，不是整份。
+
+用 MuseScore 打开，或渲染成图：
+
+```bash
+for f in out/compare-*.mscx; do
+  "/Applications/MuseScore 4.app/Contents/MacOS/mscore" -o "${f%.mscx}.png" -T 20 "$f"
+done
+```
 
 ### 收一首曲子进来
 
@@ -136,7 +176,7 @@ scripts/
   normalize.mjs        剥 eid（核心，其余都依赖它）
   score-diff.mjs       按小节的语义 diff + 小节字符区间定位 + 筛小节
   merge-versions.mjs   两份乐谱摞成一份（Part 复制 + 谱表重编号 + 改显示名）
-  compare.mjs          差异 → 筛改动小节 → 摞起来 → 出对照谱
+  compare.mjs          差异 → 按连续段切分 → 每段一份对照谱
   render-changed.mjs   筛出改动小节 → 渲染 PNG / MP3
   import-score.mjs     把 .mscz 收进仓库
   ci-preview.mjs       CI 入口：扫改动 → 出对照谱图 → 写报告
