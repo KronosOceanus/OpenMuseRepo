@@ -106,6 +106,10 @@ const bin = findMuseScore()
 const ffmpeg = hasFfmpeg()
 mkdirSync(outDir, { recursive: true })
 
+// 把工具可用性打出来 —— CI 日志里一眼能看到是不是环境缺东西
+console.error(`[环境] MuseScore: ${bin ?? '❌ 没找到'}`)
+console.error(`[环境] ffmpeg:    ${ffmpeg ? '✅' : '❌ 没找到（不会生成 MP4）'}`)
+
 const report = []
 const attachments = [] // 要 --attach 的文件（相对当前目录的路径）
 report.push('## 🎼 乐谱改动预览')
@@ -199,13 +203,18 @@ for (const { name, path: headPath } of headScores) {
     //
     // 音频用「改后」那一侧的乐谱，不是上面那张对照谱 ——
     // 对照谱有 4 个谱表（原版 + 改后同时在），播出来像两台钢琴一起弹。
-    if (ffmpeg) {
+    if (!ffmpeg) {
+      console.error(`[跳过声音] 找不到 ffmpeg`)
+    } else {
       try {
         const headScorePath = join(pieceOut, `_audio-${n}.mscx`)
         writeFileSync(headScorePath, it.headScore, 'utf8')
         const mp3Path = join(pieceOut, `changed-${n}.mp3`)
 
-        if (exportScore(bin, headScorePath, mp3Path, ['-b', '192'])) {
+        const mp3ok = exportScore(bin, headScorePath, mp3Path, ['-b', '192'])
+        if (!mp3ok) {
+          console.error(`[跳过声音] 第 ${n} 段：MuseScore 没导出 mp3`)
+        } else {
           const mp4 = makeMp4(png, mp3Path, join(pieceOut, `play-${n}.mp4`), { width: 1400 })
           if (mp4) {
             report.push('▶️ **点开听**（这是「改后」那一版的声音）：')
@@ -215,10 +224,12 @@ for (const { name, path: headPath } of headScores) {
             report.push(`![](${linkFor(relative(outDir, mp4))})`)
             report.push('')
             noteAttachment(relative(outDir, mp4))
+          } else {
+            console.error(`[跳过声音] 第 ${n} 段：ffmpeg 合成 mp4 失败`)
           }
         }
-      } catch {
-        /* 声音失败不影响图和 diff */
+      } catch (e) {
+        console.error(`[跳过声音] 第 ${n} 段：${String(e.message).split('\n')[0]}`)
       }
     }
 
