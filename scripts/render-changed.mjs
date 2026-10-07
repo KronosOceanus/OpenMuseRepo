@@ -74,6 +74,69 @@ export function exportPng(mscoreBin, scorePath, outPath) {
 }
 
 /**
+ * 静态谱面图 + 音频 → MP4。
+ *
+ * 【为什么要做成视频】
+ *
+ * GitHub 的 Markdown 不能嵌音频播放器，但**可以嵌视频播放器** ——
+ * 只要文件是通过评论的附件上传的（`gh pr comment --attach`）。
+ * 所以「谱面图 + 音频 = 一个静止画面的 MP4」就能在 PR 里点开就听。
+ *
+ * 【编码参数不是随便写的】
+ *
+ *   -pix_fmt yuv420p        浏览器只认这个像素格式，缺了会黑屏
+ *   -vf scale=trunc(iw/2)*2 宽高必须是偶数，缺了 h264 直接报错
+ *   -c:a aac                mp4 容器里的音频，浏览器普遍支持
+ *   -shortest               音轨结束就结束（图是 -loop 1，不会自己停）
+ *   -tune stillimage        静止画面用的编码预设，体积小很多
+ *
+ * @returns {string|null} 实际产出的路径，失败返回 null
+ */
+export function makeMp4(pngPath, audioPath, outPath, { width, fps = 10 } = {}) {
+  if (!existsSync(pngPath) || !existsSync(audioPath)) return null
+
+  // 缩放表达式。
+  //
+  // ⚠️ 踩过的坑：不要用 `oh` 去算输出高度 ——
+  //    scale=1400:trunc(oh*a/2)*2  →  "Height expression cannot be self-referencing"
+  //    ffmpeg 里 `-2` 就是「保持比例、自动取偶数」，直接用它。
+  //    高度取偶数是因为 h264 要求宽高都是偶数。
+  const scale = width ? `scale=${width}:-2` : 'scale=trunc(iw/2)*2:trunc(ih/2)*2'
+
+  try {
+    execFileSync(
+      'ffmpeg',
+      [
+        '-y',
+        '-loop', '1', '-framerate', String(fps), '-i', pngPath,
+        '-i', audioPath,
+        '-c:v', 'libx264',
+        '-tune', 'stillimage',
+        '-pix_fmt', 'yuv420p',
+        '-vf', scale,
+        '-c:a', 'aac', '-b:a', '192k',
+        '-shortest',
+        outPath,
+      ],
+      { stdio: 'pipe', timeout: 300000 },
+    )
+  } catch {
+    return null
+  }
+  return existsSync(outPath) ? outPath : null
+}
+
+/** ffmpeg 在不在。 */
+export function hasFfmpeg() {
+  try {
+    execFileSync('ffmpeg', ['-version'], { stdio: 'pipe', timeout: 20000 })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * macOS 注意：MuseScore 启动时要往 `~/Library/Application Support/MuseScore/`
  * 写日志和设置。如果进程被限制在工作目录内（沙箱），它会静默退出、什么都不产出。
  * 表现是：退出码 0，但没有输出文件，stderr 里有

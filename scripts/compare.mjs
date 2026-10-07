@@ -127,7 +127,11 @@ export function buildComparisons(baseXml, headXml, opts = {}) {
       shortA,
       shortB,
     })
-    items.push({ from, to, measures: run, xml, label: `第 ${range} 小节`, marked })
+
+    // headScore 是「改后」那一侧筛后的乐谱 —— 拿它去导出这一段的声音。
+    // 不能用上面合并后的 xml：那是 4 个谱表（原版+改后同时在），
+    // 播出来会像两台钢琴一起弹。
+    items.push({ from, to, measures: run, xml, headScore: b0, label: `第 ${range} 小节`, marked })
   }
 
   return {
