@@ -90,7 +90,7 @@ jobs:
       #    而 MuseScore 4 存的 .mscx 是 version 4.50/4.60，**v3 打不开**。
       #    官方 PPA 在 noble 上也只有 2.3.2。所以只能用 v4 的 AppImage。
 
-      - name: MuseScore ① 装 Xvfb + 运行库
+      - name: MuseScore ① 装 Xvfb + 运行库 + ffmpeg
         continue-on-error: true
         run: |
           set -x
@@ -102,12 +102,17 @@ jobs:
           #    AppRun 对 libOpenGL / libjack / libpipewire 有自带 fallback，
           #    但 libEGL.so.1 没有 —— 缺它就直接 127。
           #
+          # ⚠️ 另一个踩过的坑：**GitHub 的 ubuntu runner 不预装 ffmpeg。**
+          #    （查过 runner-images 的 Ubuntu2404-Readme，ffmpeg 出现 0 次。）
+          #    没有 ffmpeg 就合成不出 MP4，PR 评论里就没有播放器 —— 而且它
+          #    是"静默降级"，日志里只会有一句"[环境] ffmpeg: ❌"。
+          #
           #    逐个装而不是一次性列一堆：多包安装时只要有一个包名不存在，
           #    整条命令失败、一个都装不上。逐个装能把失败限制在单个包。
           #    包名按 Ubuntu 24.04 (noble) 的实际提供方查过；
           #    带 t64 后缀的是 24.04 的时间戳迁移改名，老版本不带后缀所以两种都试。
           for p in \
-            xvfb xauth \
+            xvfb xauth ffmpeg \
             libegl1 libopengl0 libgl1 libglx-mesa0 libgbm1 \
             libjack-jackd2-0 libjack0 \
             libpipewire-0.3-0t64 libpipewire-0.3-0 \
@@ -124,6 +129,8 @@ jobs:
           done
 
           which xvfb-run Xvfb xauth
+          echo "--- ffmpeg 检查 ---"
+          which ffmpeg && ffmpeg -version | head -1
           echo "--- 装完了 ---"
 
       - name: MuseScore ② 下载 AppImage
