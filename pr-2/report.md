@@ -4,22 +4,20 @@
 
 改动 **4** 个小节，切出 **3** 个连续段：第 5 小节、第 21 小节、第 40 小节、第 41 小节
 
-**第 5 小节**（上＝原版，下＝改后）
+**第 5 小节**（上＝原版，下＝改后，红＝改掉／绿＝改成）
 
 ![第 5 小节](https://raw.githubusercontent.com/KronosOceanus/OpenMuseRepo/previews/pr-2/%E7%A5%9E%E8%AF%9D2/compare-1-1.png)
 
 
-**第 21 小节**（上＝原版，下＝改后）
+**第 21 小节**（上＝原版，下＝改后，红＝改掉／绿＝改成）
 
 ![第 21 小节](https://raw.githubusercontent.com/KronosOceanus/OpenMuseRepo/previews/pr-2/%E7%A5%9E%E8%AF%9D2/compare-2-1.png)
 
 
-**第 40–41 小节**（上＝原版，下＝改后）
+**第 40–41 小节**（上＝原版，下＝改后，红＝改掉／绿＝改成）
 
 ![第 40–41 小节](https://raw.githubusercontent.com/KronosOceanus/OpenMuseRepo/previews/pr-2/%E7%A5%9E%E8%AF%9D2/compare-3-1.png)
 
-
-🎧 音频（改动的小节连起来听）：[神话2/changed.mp3](https://raw.githubusercontent.com/KronosOceanus/OpenMuseRepo/previews/pr-2/%E7%A5%9E%E8%AF%9D2/changed.mp3)
 
 <details><summary>文字 diff（精确到行）</summary>
 
