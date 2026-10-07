@@ -87,14 +87,41 @@ jobs:
       #    而 MuseScore 4 存的 .mscx 是 version 4.50/4.60，**v3 打不开**。
       #    官方 PPA 在 noble 上也只有 2.3.2。所以只能用 v4 的 AppImage。
 
-      - name: MuseScore ① 装 Xvfb
+      - name: MuseScore ① 装 Xvfb + 运行库
         continue-on-error: true
         run: |
           set -x
           sudo apt-get update -qq
-          # xauth 是 xvfb-run 的运行时依赖，不显式装有时会缺
-          sudo apt-get install -y -qq xvfb xauth
+
+          # ⚠️ 踩过的坑：AppImage 里不含系统运行库，缺一个就整个起不来。
+          #    上一次的报错：
+          #      mscore4portable: error while loading shared libraries: libEGL.so.1
+          #    AppRun 对 libOpenGL / libjack / libpipewire 有自带 fallback，
+          #    但 libEGL.so.1 没有 —— 缺它就直接 127。
+          #
+          #    逐个装而不是一次性列一堆：多包安装时只要有一个包名不存在，
+          #    整条命令失败、一个都装不上。逐个装能把失败限制在单个包。
+          #    包名按 Ubuntu 24.04 (noble) 的实际提供方查过；
+          #    带 t64 后缀的是 24.04 的时间戳迁移改名，老版本不带后缀所以两种都试。
+          for p in \
+            xvfb xauth \
+            libegl1 libopengl0 libgl1 libglx-mesa0 libgbm1 \
+            libjack-jackd2-0 libjack0 \
+            libpipewire-0.3-0t64 libpipewire-0.3-0 \
+            libxkbcommon0 libxkbcommon-x11-0 libnss3 \
+            libasound2t64 libasound2 \
+            libfontconfig1 libfreetype6 \
+            libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxi6 libxcursor1 \
+            libsm6 libice6 libdrm2 libglx0 ; do
+            sudo apt-get install -y -qq "$p" >/dev/null 2>&1 \
+              && printf "  ✅ %s\n" "$p" \
+              || printf "  ⚠️  %s 装不上（可能包名不同，跳过）\n" "$p"
+          done
+
           which xvfb-run Xvfb xauth
+          echo "--- 装完了 ---"
 
       - name: MuseScore ② 下载 AppImage
         continue-on-error: true
@@ -141,7 +168,25 @@ jobs:
           sudo chmod +x /usr/local/bin/mscore
           cat /usr/local/bin/mscore
 
-      - name: MuseScore ④ 自检
+      - name: MuseScore ④ 查缺失依赖
+        # ⚠️ 这一步是排错的关键：ldd 会**直接列出还缺哪些 .so**，
+        #    不用再从「exit code 127」倒推。
+        #    上一次就是靠运行日志里的
+        #      mscore4portable: error while loading shared libraries: libEGL.so.1
+        #    才定位到缺 libegl1。
+        continue-on-error: true
+        run: |
+          set -x
+          BIN=/tmp/squashfs-root/bin/mscore4portable
+          ls -la "$BIN" || true
+
+          echo "=== ldd 缺失的库 ==="
+          ldd "$BIN" 2>&1 | grep -i "not found" || echo "（ldd 层面没有缺失）"
+
+          echo "=== 主程序自带的库目录 ==="
+          ls /tmp/squashfs-root/lib/ 2>/dev/null | head -20 || true
+
+      - name: MuseScore ⑤ 自检
         continue-on-error: true
         run: |
           set -x
@@ -153,6 +198,11 @@ jobs:
             echo "MuseScore 可用 → 会出对照谱图" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "MuseScore 不可用 → 本次只有文字 diff" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "缺失的库（来自 ldd）：" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            ldd /tmp/squashfs-root/bin/mscore4portable 2>&1 | grep -i "not found" >> "$GITHUB_STEP_SUMMARY" || echo "（ldd 无缺失，问题在别处）" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: 生成对照
