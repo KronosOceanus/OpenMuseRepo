@@ -1,0 +1,10 @@
+# 渲染产出（每次 CI 重新生成，不进版本库）
+out/
+**/out/
+
+# 筛小节时的中间产物
+_filtered/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
