@@ -72,22 +72,51 @@ jobs:
           node-version: '22'
 
       - name: 装 MuseScore 4（AppImage）+ Xvfb
+        id: mscore
+        # ⚠️ 关键：MuseScore 只是"锦上添花"（出图和音频），
+        #    文字 diff 不需要它。装不上不该让整个 PR 显示为失败。
+        #    这个坑踩过：原来没有 continue-on-error，AppImage 下错了
+        #    就直接把 CI 弄红，看不出真正原因。
+        continue-on-error: true
         run: |
-          set -e
+          set -euo pipefail
+
           sudo apt-get update -qq
-          # xvfb 给虚拟显示器；libfuse2 是 AppImage 直跑的依赖
-          # （下面用 --appimage-extract 绕开 FUSE，装不上也不影响）
-          sudo apt-get install -y -qq xvfb libfuse2 || sudo apt-get install -y -qq xvfb
+          sudo apt-get install -y -qq xvfb || true
 
-          curl -sSL -o /tmp/MuseScore.AppImage \
-            https://musescore.org/en/download/musescore-x86_64.AppImage
+          # ⚠️ 坑：https://musescore.org/en/download/musescore-x86_64.AppImage
+          #    返回的是 **HTML 跳转页**，不是文件（content-type: text/html）。
+          #    直接 curl 会下到 25 KB 的 HTML，chmod +x 也照样成功，
+          #    直到 --appimage-extract 才失败 —— 报错完全看不出原因。
+          #    真地址要从那个页面里解析出来。
+          JUMP="https://musescore.org/en/download/musescore-x86_64.AppImage"
+          URL=$(curl -sL --max-time 60 "$JUMP" 2>/dev/null \
+                | grep -oE 'https://github\.com/musescore/MuseScore/releases/download/[^"'"'"' <>]+x86_64\.AppImage' \
+                | head -1 || true)
+
+          if [ -z "$URL" ]; then
+            echo "::warning::解析不到最新 AppImage 地址，用兜底的固定版本"
+            URL="https://github.com/musescore/MuseScore/releases/download/v4.7.5/MuseScore-Studio-4.7.5.260831071-x86_64.AppImage"
+          fi
+          echo "AppImage：$URL"
+
+          curl -L --max-time 600 -o /tmp/MuseScore.AppImage "$URL"
+
+          # 校验必须是 ELF。这一条能直接抓住"下到 HTML"的情况。
+          MAGIC=$(head -c 4 /tmp/MuseScore.AppImage | od -An -tx1 | tr -d ' \n')
+          if [ "$MAGIC" != "7f454c46" ]; then
+            echo "::error::下载到的不是 AppImage（前 4 字节 $MAGIC，应为 7f454c46）"
+            head -c 300 /tmp/MuseScore.AppImage
+            exit 1
+          fi
+          echo "大小：$(stat -c %s /tmp/MuseScore.AppImage) 字节"
+
           chmod +x /tmp/MuseScore.AppImage
+          cd /tmp
+          /tmp/MuseScore.AppImage --appimage-extract > /dev/null
+          test -f /tmp/squashfs-root/AppRun
 
-          # 解开，避免依赖 FUSE
-          cd /tmp && /tmp/MuseScore.AppImage --appimage-extract > /dev/null
-          ls /tmp/squashfs-root/AppRun
-
-          # 包装成 PATH 上的 mscore —— 这样本地和 CI 用的是同一个名字，
+          # 包装成 PATH 上的 mscore —— 这样本地和 CI 用同一个名字，
           # ci-preview.mjs 的 findMuseScore() 按名字找得到。
           sudo tee /usr/local/bin/mscore > /dev/null <<'WRAP'
           #!/bin/sh
@@ -95,7 +124,15 @@ jobs:
           WRAP
           sudo chmod +x /usr/local/bin/mscore
 
-          mscore --version || echo "⚠️ mscore 起不来，这次只会出 diff"
+          mscore --version
+
+      - name: 确认 MuseScore 可用性
+        run: |
+          if command -v mscore >/dev/null 2>&1 && mscore --version >/dev/null 2>&1; then
+            echo "MuseScore 可用 → 会出对照谱图" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "MuseScore 不可用 → 本次只有文字 diff" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: 生成对照
         run: node scripts/ci-preview.mjs --base-dir _base --out out
@@ -106,15 +143,16 @@ jobs:
           name: score-preview
           path: out/
           retention-days: 14
+          if-no-files-found: warn
 
       - name: 贴回 PR
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && hashFiles('out/report.md') != ''
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs')
-            const body = fs.readFileSync('out/report.md', 'utf8')
             const marker = '<!-- openmuse-preview -->'
+            const body = fs.readFileSync('out/report.md', 'utf8')
             const full = marker + '\n' + body
 
             const { data: comments } = await github.rest.issues.listComments({
