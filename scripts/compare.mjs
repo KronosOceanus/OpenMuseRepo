@@ -28,9 +28,16 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { scoreDiff, filterMeasures } from './score-diff.mjs'
 import { mergeVersions, dissect } from './merge-versions.mjs'
+import { highlightScorePair, COLORS } from './highlight.mjs'
 
-/** 默认：一个连续段最多渲染多少小节（再多就自己会被分页劈开）。 */
-export const DEFAULT_MAX_PER_RUN = 8
+/**
+ * 默认：一个连续段最多渲染多少小节。
+ *
+ * 实测：一首中等密度的钢琴曲，**一个系统只能放约 3 个小节**。
+ * 段太长会让「上原版 / 下改后」跨系统被切开（配对仍然正确，只是要跨行看）。
+ * 所以取 4 —— 稍微宽松一点，大多数情况仍是单系统；要更严可以传 --max-per-run 3。
+ */
+export const DEFAULT_MAX_PER_RUN = 4
 /** 默认：最多渲染多少个段（再多就只给前几个 + 一句说明）。 */
 export const DEFAULT_MAX_RUNS = 6
 
@@ -97,15 +104,30 @@ export function buildComparisons(baseXml, headXml, opts = {}) {
     const to = run[run.length - 1]
     const range = from === to ? `${from}` : `${from}–${to}`
 
+    // 先筛出这一段，再染色，最后摞起来。
+    // 顺序不能反：染色会改变 XML 长度，先染后筛会让小节偏移量失效。
+    const a0 = filterMeasures(baseXml, run)
+    const b0 = filterMeasures(headXml, run)
+
+    let a = a0
+    let b = b0
+    let marked = 0
+    if (opts.color !== false) {
+      const hl = highlightScorePair(a0, b0, opts.colors ?? COLORS)
+      a = hl.a
+      b = hl.b
+      marked = hl.changedMeasures.length
+    }
+
     // 标签带上小节范围 —— 每张图自己说清楚它是哪一段，
     // 不用回去翻 PR 描述。
-    const xml = mergeVersions(filterMeasures(baseXml, run), filterMeasures(headXml, run), {
+    const xml = mergeVersions(a, b, {
       labelA: `${labelA} ${range}`,
       labelB: `${labelB} ${range}`,
       shortA,
       shortB,
     })
-    items.push({ from, to, measures: run, xml, label: `第 ${range} 小节` })
+    items.push({ from, to, measures: run, xml, label: `第 ${range} 小节`, marked })
   }
 
   return {
