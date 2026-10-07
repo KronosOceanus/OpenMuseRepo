@@ -228,6 +228,19 @@ jobs:
           PAT: ${{ secrets.OPENMUSE_PAT }}
         run: |
           PR="${{ github.event.pull_request.number }}"
+
+          # ⚠️ 这段诊断别删。secret 没配对时它是最快的定位手段：
+          #    名字差一个字、加成了 environment secret、加到别的仓库 ——
+          #    表现都是「这里长度为 0」，然后静默走 previews 退路。
+          #    只打长度，不打内容（内容本身也会被 GitHub 打码成 ***）。
+          echo "=== secret 检查 ==="
+          echo "OPENMUSE_PAT 读到的长度：${#PAT}"
+          echo "仓库：${{ github.repository }}"
+          if [ -z "$PAT" ]; then
+            echo "::warning::没读到 OPENMUSE_PAT —— 检查 secret 的名字是否完全一致、是否加在仓库级（不是 environment 级）"
+            echo "⚠️ 没读到 OPENMUSE_PAT，走 previews 退路" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           if [ -n "$PAT" ]; then
             echo "模式：attach（有 OPENMUSE_PAT）"
             echo "mode=attach" >> "$GITHUB_OUTPUT"
