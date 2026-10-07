@@ -1,12 +1,26 @@
 # GitHub Actions：PR 时自动生成乐谱对照
 #
-# 这就是整件事的"自动化"部分。它做的是：
-#   ① 把基准分支的乐谱 checkout 到 _base/
+# 做三件事：
+#   ① 把基准版本 checkout 到 _base/
 #   ② 跑 scripts/ci-preview.mjs → 语义 diff + 只渲染改动的小节（PNG + MP3）
 #   ③ 把结果当评论贴回 PR
 #
-# 于是审核的人不需要开 MuseScore、不需要自己找位置 ——
-# PR 里直接看到「第几小节、哪一行变了、长什么样、听起来怎样」。
+# ── 关于 MuseScore 的版本（踩过的坑，别改回去）────────────────────
+#
+# Ubuntu 24.04 的 apt 里**只有 v2 和 v3**：
+#   musescore   2.3.2
+#   musescore3  3.2.3
+#   （没有 musescore4）
+#
+# 而 MuseScore 4 存的 .mscx 是 version="4.50"/"4.60"，**MuseScore 3 打不开**。
+# 所以 `apt install musescore3` 会装上一个读不了你乐谱的程序 —— workflows 显示
+# 成功，实际每次都静默失败。只能用 v4 的 AppImage。
+#
+# ── 关于无头环境 ──────────────────────────────────────────────────
+#
+# MuseScore 是 Qt 应用，需要 X display。CI 上没有显示器，会报
+#   "qt.qpa.xcb: could not connect to display"
+# 所以要 xvfb-run 包一层。MuseScore 官方论坛确认：他们自己的 CI 就是这么做的。
 
 name: 乐谱改动预览
 
@@ -16,10 +30,11 @@ on:
       - 'pieces/**/*.mscx'
       - 'scripts/**'
       - '.github/workflows/score-preview.yml'
+  workflow_dispatch: # 允许手动触发（第一次验证用）
 
 permissions:
   contents: read
-  pull-requests: write # 贴评论要用
+  pull-requests: write
 
 jobs:
   preview:
@@ -27,11 +42,28 @@ jobs:
     steps:
       - name: 取提交版本
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 算基准 SHA
+        id: base
+        run: |
+          # PR：跟目标分支的基线比
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            sha="${{ github.event.pull_request.base.sha }}"
+          # 手动触发：跟上一次提交比；只有一个提交时跟自己比（会得到"没有改动"）
+          elif git rev-parse HEAD~1 >/dev/null 2>&1; then
+            sha="$(git rev-parse HEAD~1)"
+          else
+            sha="$(git rev-parse HEAD)"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "基准：$sha"
 
       - name: 取基准版本
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ steps.base.outputs.sha }}
           path: _base
 
       - name: 装 Node
@@ -39,17 +71,36 @@ jobs:
         with:
           node-version: '22'
 
-      - name: 装 MuseScore
+      - name: 装 MuseScore 4（AppImage）+ Xvfb
         run: |
+          set -e
           sudo apt-get update -qq
-          # Ubuntu runner 上包名随版本变化，装到哪个用哪个
-          sudo apt-get install -y -qq musescore3 || sudo apt-get install -y -qq musescore || true
-          which mscore musescore3 musescore || echo "没装上 MuseScore，只会出 diff"
+          # xvfb 给虚拟显示器；libfuse2 是 AppImage 直跑的依赖
+          # （下面用 --appimage-extract 绕开 FUSE，装不上也不影响）
+          sudo apt-get install -y -qq xvfb libfuse2 || sudo apt-get install -y -qq xvfb
+
+          curl -sSL -o /tmp/MuseScore.AppImage \
+            https://musescore.org/en/download/musescore-x86_64.AppImage
+          chmod +x /tmp/MuseScore.AppImage
+
+          # 解开，避免依赖 FUSE
+          cd /tmp && /tmp/MuseScore.AppImage --appimage-extract > /dev/null
+          ls /tmp/squashfs-root/AppRun
+
+          # 包装成 PATH 上的 mscore —— 这样本地和 CI 用的是同一个名字，
+          # ci-preview.mjs 的 findMuseScore() 按名字找得到。
+          sudo tee /usr/local/bin/mscore > /dev/null <<'WRAP'
+          #!/bin/sh
+          exec xvfb-run -a /tmp/squashfs-root/AppRun "$@"
+          WRAP
+          sudo chmod +x /usr/local/bin/mscore
+
+          mscore --version || echo "⚠️ mscore 起不来，这次只会出 diff"
 
       - name: 生成对照
         run: node scripts/ci-preview.mjs --base-dir _base --out out
 
-      - name: 上传产出（图片和音频没法直接贴进评论，作为 artifact 附上）
+      - name: 上传产出
         uses: actions/upload-artifact@v4
         with:
           name: score-preview
@@ -57,6 +108,7 @@ jobs:
           retention-days: 14
 
       - name: 贴回 PR
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -65,7 +117,6 @@ jobs:
             const marker = '<!-- openmuse-preview -->'
             const full = marker + '\n' + body
 
-            // 找已有的预览评论，有就更新，没有就新建（避免每次都堆一条）
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
