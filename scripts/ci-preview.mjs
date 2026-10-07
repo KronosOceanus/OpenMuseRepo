@@ -38,8 +38,24 @@ const outDir = opt('--out', 'out')
 const maxPerRun = Number(opt('--max-per-run', DEFAULT_MAX_PER_RUN))
 const maxRuns = Number(opt('--max-runs', DEFAULT_MAX_RUNS))
 
+// 图片链接的前缀。
+//
+// PR 评论里写 `![](神话2/compare-1-1.png)` 是没人能看到的 —— 那个路径不在仓库里，
+// GitHub 渲染不了。所以 CI 会把产出推到 `previews` 分支，这里给出对应的 raw URL：
+//   --image-base https://raw.githubusercontent.com/<owner>/<repo>/previews/pr-<N>
+//
+// 不传就是本地模式，用相对路径（本地看图直接用文件系统）。
+const imageBase = (opt('--image-base', '') || '').replace(/\/$/, '')
+
+/** 产出的相对路径 → 报告里该用的链接。 */
+function linkFor(relPath) {
+  if (!imageBase) return relPath
+  // 路径里有中文（pieces 里的曲名），必须编码，否则 Markdown 链接会断
+  return `${imageBase}/${encodeURI(relPath)}`
+}
+
 if (!baseDir) {
-  console.error('用法: node scripts/ci-preview.mjs --base-dir <基准目录> [--out out]')
+  console.error('用法: node scripts/ci-preview.mjs --base-dir <基准目录> [--out out] [--image-base <url>]')
   process.exit(1)
 }
 
@@ -122,7 +138,7 @@ for (const { name, path: headPath } of headScores) {
     if (bin) {
       try {
         const png = exportPng(bin, cmpPath, join(pieceOut, `compare-${i + 1}.png`))
-        if (png) report.push(`![${it.label}](${relative(outDir, png)})`, '')
+        if (png) report.push(`![${it.label}](${linkFor(relative(outDir, png))})`, '')
       } catch (e) {
         report.push(`_渲染失败：${String(e.message).slice(0, 80)}_`, '')
       }
@@ -141,7 +157,7 @@ for (const { name, path: headPath } of headScores) {
       const audioSrc = join(pieceOut, '_audio.mscx')
       writeFileSync(audioSrc, filterMeasures(headXml, changed), 'utf8')
       if (exportScore(bin, audioSrc, join(pieceOut, 'changed.mp3'), ['-b', '192'])) {
-        report.push(`音频（改动的小节，连起来听）：\`${name}/changed.mp3\``)
+        report.push(`🎧 音频（改动的小节连起来听）：[${name}/changed.mp3](${linkFor(`${name}/changed.mp3`)})`)
         report.push('')
       }
     } catch {
