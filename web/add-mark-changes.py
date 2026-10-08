@@ -121,6 +121,34 @@ def add_wedge(measure, kind, stop_measure=None):
     return False
 
 
+def add_slur(meas_from, nth_from, meas_to, nth_to):
+    """加一条连音线 —— **必须成对写**：起点 <slur type="start"/>，
+    终点 <slur type="stop"/>。
+
+    ⚠️⚠️ 只写起点的话，谱面上**什么都看不到**。
+       实测用户反馈：「连音线 无→1，但谱面没看到哪变了，
+       只有第一个音符有红绿框」—— 差异清单是对的、框也是对的，
+       是注入的那个记号本身残了（MusicXML 里连音线是一对）。
+
+       这和「渐强只写 crescendo 不写 stop」是同一类错，
+       那次的表现是"右边通篇都在渐强"。**凡是一对的记号都要成对写。**
+
+    返回 True 表示两边都写上了。
+    """
+    def put(m, nth, kind):
+        notes = [n for n in m.findall('note') if n.find('rest') is None]
+        if not notes:
+            return False
+        n = notes[min(nth, len(notes) - 1)]
+        nt = n.find('notations')
+        if nt is None:
+            nt = ET.SubElement(n, 'notations')
+        ET.SubElement(nt, 'slur', {'type': kind, 'number': '1'})
+        return True
+
+    return put(meas_from, nth_from, 'start') and put(meas_to, nth_to, 'stop')
+
+
 def add_notation(measure, tag, nth=0):
     """给第 nth 个音加一个记号（slur / staccato / accent…）。"""
     notes = [n for n in measure.findall('note') if n.find('rest') is None]
@@ -131,7 +159,9 @@ def add_notation(measure, tag, nth=0):
     if nt is None:
         nt = ET.SubElement(n, 'notations')
     if tag == 'slur':
-        ET.SubElement(nt, 'slur', {'type': 'start', 'number': '1'})
+        # ⚠️ 这里**故意不处理** slur —— 连音线必须成对写（start + stop）。
+        #    用 add_slur(a, i, b, j)。见它的注释。
+        return False
     else:
         artic = nt.find('articulations')
         if artic is None:
@@ -178,6 +208,16 @@ def main():
             a, b = b, a
         add_wedge(measures[a], 'crescendo', measures[b])
         plan.append(f'第 {a + 1}-{b + 1} 小节　加渐强（含结束）')
+    # 连音线：挑一个**至少有三个发声音符**的小节，把第 1 个连到第 3 个
+    # ⚠️ 必须成对 —— 原来只写起点，谱面上画不出来（见 add_slur 注释）
+    i_sl = None
+    for i in range(max(i_tmp + 2, 1), len(measures)):
+        if len([n for n in measures[i].findall('note') if n.find('rest') is None]) >= 3:
+            i_sl = i
+            break
+    if i_sl is not None and add_slur(measures[i_sl], 0, measures[i_sl], 2):
+        plan.append(f'第 {i_sl + 1} 小节　加连音线（第 1→3 个音，含终点）')
+
     i_st = pick_measure(measures, max(b + 4, 30))
     if add_notation(measures[i_st], 'staccato', 0):
         add_notation(measures[i_st], 'staccato', 1)

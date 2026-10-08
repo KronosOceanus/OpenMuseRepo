@@ -34,10 +34,27 @@
 """
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
 import xml.etree.ElementTree as ET
+
+
+def _load_sibling(fname, modname):
+    """载入同目录下的另一个脚本当模块（文件名带连字符，不能直接 import）。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(modname, os.path.join(here, fname))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ⚠️ 音符位置的口径**必须只有一处实现**。
+#    tick 的取整方式差一点就会让页面上的「音高 + 位置」匹配全部失手
+#    （round → 2469 vs 整除 → 2468，实测因此漏掉过绿框，见 README ⑲）。
+#    所以这里直接复用 diff-musicxml.measure_notes，不另写一份。
+DM = _load_sibling('diff-musicxml.py', 'diffmusicxml')
 
 LABEL = {
     'dynamics': '力度', 'words': '文字', 'tempo': '速度', 'wedge': '渐强渐弱',
@@ -127,6 +144,53 @@ def notation_signature(measure):
         for w in bl.findall('ending'):
             sig.setdefault('barline', []).append('ending:' + (w.get('number') or '?'))
     return sig
+
+
+def note_mark_set(note_el):
+    """这一个音符挂了哪些记号。返回标签集合（跳音/重音/连音线…）。
+
+    ⚠️ <articulations> / <ornaments> 是**容器**，真正有意义的是里面的子元素
+       （<articulations><staccato/></articulations>）。和 notation_signature 同一套展开规则。
+    """
+    out = set()
+    for nt in note_el.findall('notations'):
+        for child in nt:
+            if child.tag in ('articulations', 'ornaments'):
+                for sub in child:
+                    out.add(sub.tag)
+            elif child.tag in ('slur', 'tied'):
+                if child.get('type') in (None, 'start'):
+                    out.add(child.tag)
+            else:
+                out.add(child.tag)
+    return out
+
+
+def note_marks_between(meas_a, meas_b, div_a, div_b):
+    """两小节里**同一位置**（音高 + tick 都相同）的音符，记号却不一致的。
+
+    只比「两边都在、且位置完全相同」的音符 ——
+    被增删或移位的音符由音符差异清单负责（那边已经画框了），
+    在这里再报一遍只会让同一个音符被两套逻辑各画一次。
+
+    返回 [{'kindKey': 'staccato', 'note': {'pitch':…, 'tick':…, 'name':…}}, …]
+    """
+    na = DM.measure_notes(meas_a, div_a or 1, keep_el=True)
+    nb = DM.measure_notes(meas_b, div_b or 1, keep_el=True)
+    ma = {(x['pitch'], x['tick']): x for x in na}
+    mb = {(x['pitch'], x['tick']): x for x in nb}
+
+    out = []
+    for key in sorted(set(ma) & set(mb)):
+        sa = note_mark_set(ma[key]['el'])
+        sb = note_mark_set(mb[key]['el'])
+        # 对称差：这一侧有、另一侧没有的记号 —— 就是"改了"
+        for tag in sorted(sa ^ sb):
+            out.append({
+                'kindKey': tag,
+                'note': {'pitch': key[0], 'tick': key[1], 'name': ma[key]['name']},
+            })
+    return out
 
 
 def merge_directions(parts_measures, mi):
@@ -238,14 +302,38 @@ def build(path_a, path_b, la=None, lb=None):
             global_items.append({'index': i, 'number': number_of(i), 'items': d})
 
     # ② 音符挂载类：分声部
+    #
+    # 同时产出 noteMarks —— 「改动落在**哪个音符**上」。
+    # 清单里只写「跳音：无 → 2」是不够的：用户知道多了两个跳音，
+    # 但不知道是哪两个。有了坐标，页面就能把它们用红绿框圈出来。
     part_items = []
+    note_marks = []
     for nm, i, j in matched:
         mas, mbs = pa_ms[i], pb_ms[j]
+        # ⚠️ divisions 是「从此往后有效」的属性，通常只在第 1 小节出现 ——
+        #    必须跨小节沿用，跟 diff-musicxml.py 的取法一致。
+        div_a = div_b = None
         for k in range(min(len(mas), len(mbs))):
+            va = mas[k].findtext('attributes/divisions')
+            if va:
+                div_a = int(va)
+            vb = mbs[k].findtext('attributes/divisions')
+            if vb:
+                div_b = int(vb)
+
             d = compare(notation_signature(mas[k]), notation_signature(mbs[k]))
             if d:
                 part_items.append({'index': k, 'number': number_of(k), 'trackName': nm,
                                    'trackA': i, 'trackB': j, 'items': d})
+
+            for x in note_marks_between(mas[k], mbs[k], div_a, div_b):
+                note_marks.append({
+                    'index': k, 'number': number_of(k), 'trackName': nm,
+                    'trackA': i, 'trackB': j,
+                    'kindKey': x['kindKey'],
+                    'kind': LABEL.get(x['kindKey'], x['kindKey']),
+                    'note': x['note'],
+                })
 
     return {
         'base': la or '原版', 'head': lb or '改后',
@@ -253,6 +341,9 @@ def build(path_a, path_b, la=None, lb=None):
         'measureCount': n,
         'marks': global_items,          # 方向类（不分声部）
         'partMarks': part_items,        # 音符挂载类（分声部）
+        # 「改动落在哪个音符上」—— 页面据此在音符上画红/绿框。
+        # 一条 = 一个音符上的一个记号变化。
+        'noteMarks': note_marks,
         'markCount': len(global_items) + len(part_items),
     }
 
@@ -283,8 +374,18 @@ def render_text(d):
                 L.append(f'    · {k["kind"]}：{k["from"]} → {k["to"]}')
             L.append('')
 
+    nm = d.get('noteMarks') or []
+    if nm:
+        L.append('  ── 这些记号改动落在哪个音符上（页面会在这些音符上画红/绿框）──')
+        L.append('')
+        for x in nm:
+            L.append(f'  第 {x["number"]} 小节（{x["trackName"]}）'
+                     f'  {x["kind"]}　→　{x["note"]["name"]} @ tick {x["note"]["tick"]}')
+        L.append('')
+
     L.append(f'  共 {len(d["marks"])} 个小节有方向类差异，'
-             f'{len(d["partMarks"])} 个声部小节有挂载类差异')
+             f'{len(d["partMarks"])} 个声部小节有挂载类差异，'
+             f'{len(nm)} 个音符上有记号变化')
     return '\n'.join(L)
 
 

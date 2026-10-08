@@ -74,8 +74,13 @@ def note_pitch(note_el):
     return (octave + 1) * 12 + STEP_SEMITONE[step] + alter
 
 
-def measure_notes(measure_el, divisions):
+def measure_notes(measure_el, divisions, keep_el=False):
     """把一个小节里的发声音符取出来，带小节内的 tick 位置。
+
+    keep_el=True 时每个条目里多带一个 `el`（原始 <note> 元素）——
+    diff-marks.py 需要它来读这个音符挂的记号（跳音/重音/连音线…）。
+    位置口径必须只有这一处实现：tick 的取整方式差一点就会全盘失配
+    （见 README ⑲）。
 
     MusicXML 的时间轴是靠 <note>/<backup>/<forward> 的 <duration> 累加出来的：
         <note>     往前推进 duration
@@ -101,7 +106,10 @@ def measure_notes(measure_el, divisions):
                 pos += dur
             m = note_pitch(el)
             if m is not None:
-                out.append({'pitch': m, 'onset': onset})
+                e2 = {'pitch': m, 'onset': onset}
+                if keep_el:
+                    e2['el'] = el
+                out.append(e2)
         elif tag == 'backup':
             pos -= int(float(el.findtext('duration') or 0))
         elif tag == 'forward':

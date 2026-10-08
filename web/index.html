@@ -314,7 +314,7 @@
 (function () {
   'use strict'
 
-  var BUILD = 'build-95'
+  var BUILD = 'build-99'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
@@ -676,6 +676,10 @@
     // ── 记号差异：小节左边缘一条紫色竖条 ──
     // 方向类（速度/力度/文字）和挂载类（连音线/跳音）都画，
     // 因为对用户来说都是"这一小节还有别的变化"。
+    //
+    // ⚠️ 挂载类（跳音/重音）除了竖条，还会在**具体那个音符**上画红/绿框 ——
+    //    见下面 drawList 的构造。竖条只告诉你"这一小节有记号变化"，
+    //    圈到音符上才知道是哪一个。
     if (diff.marks) {
       (diff.marks.marks || []).concat(diff.marks.partMarks || []).forEach(function (mk) {
         var mb = api.boundsLookup.findMasterBarByIndex(mk.index)
@@ -772,9 +776,32 @@
             }).join('  ') + '）')
     }
 
+    // ── 记号改动的音符：也画红/绿框 ──────────────────────────────
+    //
+    // 清单里写「第 21 小节 跳音：无 → 2」只说明**改了什么**，
+    // 不说明改在**哪两个音符**上。diff.marks.noteMarks 带着每个受影响
+    // 音符的 (音高, tick)，这里把它拼成和音符差异**同形**的条目 ——
+    // 于是下面那套「音高 + 位置」匹配逻辑原封不动就能用。
+    //
+    // 两侧都放一份 ⟹ 左栏画红、右栏画绿（和音高改动同一个视觉语言）。
+    var drawList = diff.measures.slice()
+    ;((diff.marks && diff.marks.noteMarks) || []).forEach(function (x) {
+      if (!x.note) return
+      drawList.push({
+        index: x.index, number: x.number, trackName: x.trackName,
+        trackA: x.trackA, trackB: x.trackB,
+        removed: [x.note], added: [x.note],
+        _markKind: x.kind,
+      })
+    })
+    if (DEBUG && drawList.length !== diff.measures.length) {
+      log('  记号改动带音符坐标的：' + (drawList.length - diff.measures.length)
+          + ' 个（会跟着画红/绿框）')
+    }
+
     // 按小节汇总，省得每个条目都查一次坐标
     var byMeasure = {}
-    diff.measures.forEach(function (m) {
+    drawList.forEach(function (m) {
       (byMeasure[m.index] = byMeasure[m.index] || []).push(m)
     })
 
@@ -839,17 +866,22 @@
           ;(bb.beats || []).forEach(function (bt) {
             var tick = bt.beat ? bt.beat.displayStart : null
             ;(bt.notes || []).forEach(function (nb) {
-              // ⚠️⚠️ **必须用 displayValue（记谱音高），不能用 realValue。**
+              // ⚠️ 两个音高都留着（displayValue / realValue），
+              //    由下面的匹配逻辑**按整小节**选一个口径。
               //
-              //    realValue 是**实际发声音高**，已经把乐器的移调算进去了。
-              //    而差异清单里的 pitch 来自 MusicXML 的 <pitch> —— 那是记谱音高。
+              //    displayValue 通常等于 MusicXML 的 <pitch>：
+              //      · 无移调（长笛）→ 相等
+              //      · 移调乐器（小号 chrom=-2、钟琴 octave-change=2）
+              //        → displayValue 仍是**记谱**音高 ✅
+              //    实测 Dreamy 的钟琴就是靠 displayValue 才对得上：
+              //    谱上 E5/B4，realValue 给 E7/B6（高两个八度）。
               //
-              //    实测 Dreamy 的钟琴（glockenspiel）：谱上写 E5/B4，
-              //    AlphaTab 的 realValue 给的是 E7/B6（高两个八度）——
-              //    差了 24 个半音，一个都匹配不上 → 钟琴完全没有红绿标记。
+              //    ⚠️ 但**神话2 的钢琴是例外**：文件里 C6 = 84，
+              //       displayValue 给 72（低八度），只有 realValue 对得上 ——
+              //       那一份连音符差异的框都标不出来。
               //
-              //    钢琴是 C 调乐器，两者相同，所以它一直正常 —— 这个 bug
-              //    只在移调乐器上发作（Bb 单簧管、钟琴、萨克斯… 都会中）。
+              //    ⟹ 别写死认哪一个。见下面「按整小节选口径」那段。
+              //       再用 (音高, tick) 和声部区间共同定位。
               pool.push({
                 nb: nb, tick: tick,
                 pitch: nb.note
@@ -861,9 +893,31 @@
           })
         }
 
+        // ── 音高的口径按**整小节**选，不逐音符放宽 ──────────────────
+        //
+        //    AlphaTab 的 displayValue 通常等于 MusicXML 的 <pitch>：
+        //      · 无移调（长笛）= 相等
+        //      · 移调乐器（小号 chrom=-2 / 钟琴 octave-change=2）=
+        //        displayValue 仍是**记谱**音高 ✅
+        //
+        //    但实测神话2 的钢琴是例外：文件里 C6 = 84，displayValue 给 72 ——
+        //    于是那一份**一个框都标不出来**（音符差异和记号差异都一样，
+        //    只是这次做记号框才发现）。
+        //
+        //    ⟹ 先用 displayValue 精确匹配；**整小节一个都没中**时，
+        //       才整小节换 realValue 重试。
+        //       这样本来正常的情况一字不变（有命中就走原路），
+        //       只可能救回本来画不出来的，不会把对的弄错。
+        var basis = 'display'
         var hits = pool.filter(function (o) {
           return want.some(function (x) { return x.pitch === o.pitch && x.tick === o.tick })
         })
+        if (!hits.length) {
+          var hReal = pool.filter(function (o) {
+            return want.some(function (x) { return x.pitch === o.real && x.tick === o.tick })
+          })
+          if (hReal.length) { hits = hReal; basis = 'real' }
+        }
         var wantCount = (m[key] || []).length
         var relaxed = false, dropped = 0
         if (!hits.length) {
@@ -880,8 +934,11 @@
           //    「最近的那个」这个信息已经足够定位了；再叠一层歧义判断
           //    只会造成漏标。**漏标比标错更难发现** —— 实测就是这么
           //    漏掉了一处，靠肉眼逐个核对才看出来。
+          // 兜底也用**本小节选定的**口径（display 或 real），不混用
           var cand = pool.filter(function (o) {
-            return want.some(function (x) { return x.pitch === o.pitch })
+            return want.some(function (x) {
+              return basis === 'real' ? x.pitch === o.real : x.pitch === o.pitch
+            })
           })
           // 同一音高只保留最近的那一个（按 want 里的 tick 距离）
           var used = {}
@@ -889,9 +946,11 @@
           cand.forEach(function (o) {
             var d = 1e9
             want.forEach(function (x) {
-              if (x.pitch === o.pitch) d = Math.min(d, Math.abs(x.tick - o.tick))
+              if (basis === 'real' ? x.pitch === o.real : x.pitch === o.pitch) {
+                d = Math.min(d, Math.abs(x.tick - o.tick))
+              }
             })
-            var key = o.pitch
+            var key = basis === 'real' ? o.real : o.pitch
             if (!(key in used) || d < used[key].d) {
               if (used[key]) hits.splice(hits.indexOf(used[key].o), 1)
               used[key] = { d: d, o: o }
@@ -901,6 +960,10 @@
           relaxed = hits.length > 0
         }
 
+        if (DEBUG && basis === 'real') {
+          log('    小节 ' + m.number + '（' + (m.trackName || '') +
+              '）：displayValue 一个都没中 → 本小节改用 **realValue** 口径，命中 ' + hits.length, 'warn')
+        }
         if (DEBUG && (m._dbg || dropped || !hits.length)) {
           log('    小节 ' + m.number + ' ' + (m.trackName || '') +
               '：wantTrack=' + wantTrack + ' 谱表 ' + from + '..' + to +
@@ -982,7 +1045,7 @@
       // 第一次渲染往往什么都没画（坐标还没就绪），那种 0 处是正常的，
       // 报出来只会误导。所以：清单里本来就没有东西时就不报了。
       var wantByTrack = {}
-      diff.measures.forEach(function (m) {
+      drawList.forEach(function (m) {
         var t = (side === 'base') ? m.trackA : m.trackB
         var k = (m.trackName || '?') + ' #' + t
         wantByTrack[k] = wantByTrack[k] || { want: 0, track: t }
@@ -1100,10 +1163,16 @@
     list.className = 'body hide'
     var toggle = document.createElement('button')
     toggle.className = 'toggle'
+    // ⚠️ 条数要数**实际行数**。
+    //    原来写 diff.measures.length —— 那只算音符差异，
+    //    没算「整声部空缺」和「记号差异」两段，标签会比真实行数少。
+    function rowCount() {
+      return list.children.length || diff.measures.length
+    }
     function setOpen(open) {
       list.className = 'body' + (open ? '' : ' hide')
       toggle.textContent = open ? '▼ 收起差异列表'
-                                : '▲ 展开差异列表（' + diff.measures.length + ' 条）'
+                                : '▲ 展开差异列表（' + rowCount() + ' 条）'
     }
     toggle.onclick = function () { setOpen(list.className.indexOf('hide') >= 0) }
     setOpen(false)
@@ -1273,6 +1342,9 @@
         list.appendChild(row)
       })
     }
+
+    // 行都加完了，刷新一次标签（setOpen 在行之前调过一次，那时列表还空着）
+    setOpen(false)
 
     bar.appendChild(list)
     el.main.appendChild(bar)
