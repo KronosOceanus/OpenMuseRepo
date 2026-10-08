@@ -1,0 +1,70 @@
+{
+  "base": "live 版",
+  "head": "完整版",
+  "source": "moonlight-compare-a.musicxml ↔ moonlight-compare-b.musicxml",
+  "measureCount": 55,
+  "marks": [
+    {
+      "index": 0,
+      "number": "1",
+      "items": [
+        {
+          "kind": "排练号",
+          "from": "无",
+          "to": "A"
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "number": "8",
+      "items": [
+        {
+          "kind": "排练号",
+          "from": "无",
+          "to": "B"
+        }
+      ]
+    },
+    {
+      "index": 23,
+      "number": "24",
+      "items": [
+        {
+          "kind": "排练号",
+          "from": "无",
+          "to": "C"
+        },
+        {
+          "kind": "文字",
+          "from": "无",
+          "to": "开始"
+        }
+      ]
+    },
+    {
+      "index": 41,
+      "number": "42",
+      "items": [
+        {
+          "kind": "排练号",
+          "from": "无",
+          "to": "D"
+        }
+      ]
+    },
+    {
+      "index": 45,
+      "number": "46",
+      "items": [
+        {
+          "kind": "排练号",
+          "from": "无",
+          "to": "E"
+        }
+      ]
+    }
+  ],
+  "partMarks": [],
+  "markCount": 5
+}

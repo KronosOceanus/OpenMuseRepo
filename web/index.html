@@ -144,6 +144,26 @@
     stroke: #1f6fd0 !important;
   }
 
+  /* ── 记号差异的色条 ──────────────────────────────────────────────
+     音符差异有坐标（音符头），可以画红绿框。**记号没有** ——
+     力度挂在某拍上、连音线跨几个音、文字挂在时间轴上，都没法"框住"。
+     所以记号差异在**小节左边缘**画一条紫色竖条，含义是
+     「这一小节除了音符还有别的变化，去差异列表看」。
+
+     紫色和红绿区分开，一眼能分辨是哪一类差异。 */
+  .om-mark-bar {
+    position: absolute; pointer-events: none; z-index: 880;
+    background: rgba(168, 85, 220, .85);
+    border-radius: 2px;
+    box-shadow: 0 0 4px rgba(168, 85, 220, .5);
+  }
+  .cmp-sep {
+    padding: 7px 12px 4px; font-size: 11px; color: #a855dc;
+    border-top: 1px solid var(--line); margin-top: 5px;
+  }
+  .cmp-row.mark .who { color: #a855dc; }
+  .cmp-row.mark .mkbody { color: #c9a0e8; font-size: 11px; }
+
   /* ── 影子光标 ────────────────────────────────────────────────────
      「没在播的那一边」用不了真光标（给那边的实例设 tickPosition 会
      触发它自己的自动滚动，滚一截又经同步传回来 —— 就是那个
@@ -288,7 +308,7 @@
 (function () {
   'use strict'
 
-  var BUILD = 'build-72'
+  var BUILD = 'build-77'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
@@ -297,7 +317,9 @@
   //   ?mds=尺寸倍数（只对 circle 有效）  ?mdx/?mdy=像素偏移
   var MARK = (function () {
     var v = params.get('mark')
-    return ['circle', 'glow', 'box', 'underline'].indexOf(v) >= 0 ? v : 'circle'
+    // 默认 box（方框）—— 圆点在密集的谱面上不够显眼，
+    // 方框的边框能把音符头整个圈住，一眼看得出改了哪个音。
+    return ['circle', 'glow', 'box', 'underline'].indexOf(v) >= 0 ? v : 'box'
   })()
   // ⚠️ mdy 的来历：AlphaTab 的 noteHeadBounds 有个不一致 ——
   //    y 按「音符头」算（音符头中心 - 半高），h 却用「整个音符」的高。
@@ -614,6 +636,30 @@
     layer.className = 'om-diff-layer'
     var n = 0
 
+    // ── 记号差异：小节左边缘一条紫色竖条 ──
+    // 方向类（速度/力度/文字）和挂载类（连音线/跳音）都画，
+    // 因为对用户来说都是"这一小节还有别的变化"。
+    if (diff.marks) {
+      (diff.marks.marks || []).concat(diff.marks.partMarks || []).forEach(function (mk) {
+        var mb = api.boundsLookup.findMasterBarByIndex(mk.index)
+        if (!mb) return
+        var b = mb.lineAlignedBounds || mb.realBounds
+        if (!b || !b.h) return
+        var el2 = document.createElement('div')
+        el2.className = 'om-mark-bar'
+        el2.title = '第 ' + mk.number + ' 小节有记号差异：'
+          + (mk.items || []).map(function (k) {
+              return k.kind + ' ' + k.from + '→' + k.to
+            }).join('；')
+        el2.style.left = (b.x - 9) + 'px'
+        el2.style.top = b.y + 'px'
+        el2.style.width = '4px'
+        el2.style.height = b.h + 'px'
+        layer.appendChild(el2)
+        n++
+      })
+    }
+
     // ⚠️ 谱表 → track 的映射不能靠「声部数整除」推。
     //    一个 track 可能占多个谱表（钢琴 2 个），所以 11 个 track 对应
     //    12 个谱表 —— 12/11=1.09，整除推算从第 9 个 track 起就偏了，
@@ -639,7 +685,11 @@
       var bars = mb.bars || []
 
       byMeasure[idx].forEach(function (m) {
-        if (m.track == null) return
+        // ⚠️ 这里原来有 `if (m.track == null) return` —— 是「按下标配对」
+        //    时代的残留守卫。改用按名字配对后，清单里只有 trackA/trackB、
+        //    **不再有 track**，于是这行每次都命中、直接 return，
+        //    一个小节都标不出来（表现是"完全没有标注"）。
+        //    真正该守的是下面那个 wantTrack。
         // ⚠️ 声部是**按名字**配对出来的，两边的下标不一定相同。
         //    例：moonlight melody 的 live 版和完整版共有的双簧管，
         //    分别在两个文件的第 0 位和第 6 位。
@@ -871,6 +921,56 @@
       }
       list.appendChild(row)
     })
+
+    // ── 记号差异（另起一段）─────────────────────────────────────
+    // 单列一段而不是混在音符差异里 —— 性质不同：
+    // 音符差异指向具体的音符头，记号差异是"这一小节整体有变化"。
+    if (diff.marks && (diff.marks.markCount || 0)) {
+      var mkRows = []
+        .concat((diff.marks.marks || []).map(function (m) {
+          return { index: m.index, number: m.number, who: '记号', items: m.items }
+        }))
+        .concat((diff.marks.partMarks || []).map(function (m) {
+          return { index: m.index, number: m.number, who: m.trackName || '记号', items: m.items }
+        }))
+      mkRows.sort(function (a, b) { return a.index - b.index })
+
+      var mkSep = document.createElement('div')
+      mkSep.className = 'cmp-sep'
+      mkSep.textContent = '记号差异（' + mkRows.length + ' 处：力度/速度/文字/连音线/跳音…）'
+      list.appendChild(mkSep)
+
+      mkRows.forEach(function (mk) {
+        var row = document.createElement('div')
+        row.className = 'cmp-row mark'
+        ;(rowsByMeasure[mk.index] = rowsByMeasure[mk.index] || []).push(row)
+        var no = document.createElement('span'); no.className = 'no'
+        no.textContent = '第 ' + mk.number + ' 小节'
+        var who = document.createElement('span'); who.className = 'who'
+        who.textContent = mk.who
+        var body = document.createElement('span')
+        body.className = 'mkbody'
+        body.textContent = (mk.items || []).map(function (k) {
+          return k.kind + ' ' + k.from + '→' + k.to
+        }).join('；')
+        row.appendChild(no); row.appendChild(who); row.appendChild(body)
+        row.onclick = function () {
+          try {
+            var tick = measureStartTick(apiA, mk.index)
+            apiA.tickPosition = tick
+            apiB.tickPosition = tick
+            curApi().play()
+            scrollToMeasure(apiA, scoreA, mk.index)
+            scrollToMeasure(apiB, scoreB, mk.index)
+            listCur.v = -1
+            syncDiffList(curApi(), list, rowsByMeasure, listCur)
+            log('记号差异：跳到第 ' + mk.number + ' 小节')
+          } catch (e) { log('跳转失败：' + e.message, 'bad') }
+        }
+        list.appendChild(row)
+      })
+    }
+
     bar.appendChild(list)
     el.main.appendChild(bar)
 
@@ -1318,6 +1418,12 @@
     // 试过只给在播那边滚动权（能压住大部分），但设位置本身仍可能
     // 引发一次 scrollIntoView。所以干脆不做：
     // **光标只在在播的那一边出现**，这也符合直觉 —— 声音在哪边，光标在哪边。
+    // 缩放一开始就调用：立刻抹掉旧标注（见 applyZoom 的注释）
+    zoom.clearMarks = function () {
+      clearDiff(scoreA); clearDiff(scoreB)
+      if (state.hideGhost) state.hideGhost()
+    }
+
     // 缩放后延迟重画的兜底（见 applyZoom）
     zoom.redraw = function () {
       if (!diff) return
@@ -1405,6 +1511,14 @@
     if (!zoom.val) return
     var s = zoom.base * zoom.mult
     zoom.val.textContent = Math.round(zoom.mult * 100) + '%'
+
+    // ⚠️ **先清掉旧标注，再改缩放。**
+    //    重排是异步的，不清的话那 200~250ms 里旧标注还留在**旧坐标**上
+    //    （音符头已经放大、框还按原尺寸待在原处），看着像「重绘有延迟」。
+    if (zoom.clearMarks) {
+      try { zoom.clearMarks() } catch (e) { log('清旧标注失败：' + e.message, 'bad') }
+    }
+
     zoom.apis.forEach(function (api) {
       if (!api || !api.settings || !api.settings.display) return
       try {
@@ -1640,10 +1754,29 @@
         sh.textContent = '对比模式：正在读取差异清单…'
         shell.appendChild(sh); el.main.appendChild(shell)
 
-        loadJson(piece.compare)
-          .then(function (diff) {
-            log('读到 ' + diff.diffCount + ' 处差异', diff.diffCount ? 'ok' : 'warn')
-            if (!diff.diffCount) { sh.textContent = '两个版本完全一致。'; return }
+        // 音符清单必备；记号清单可选（piece.marks）。
+        // ⚠️ 记号单独一个文件、单独一个脚本产出 ——
+        //    这样出问题时不会影响已经能用的音符对比。
+        var jobs = [loadJson(piece.compare)]
+        if (piece.marks) {
+          jobs.push(loadJson(piece.marks).catch(function (e) {
+            log('记号清单读取失败（忽略）：' + e.message, 'warn')
+            return null
+          }))
+        }
+
+        Promise.all(jobs)
+          .then(function (res) {
+            var diff = res[0], mk = res[1]
+            if (mk) diff.marks = mk
+            var nm = diff.diffCount || 0
+            var mm = mk ? (mk.markCount || 0) : 0
+            log('读到 音符差异 ' + nm + ' 处，记号差异 ' + mm + ' 处',
+                (nm || mm) ? 'ok' : 'warn')
+            // ⚠️ 不能只看 diffCount —— **只有记号改动时音符差异是 0**，
+            //    旧写法会直接显示「两个版本完全一致」并 return，
+            //    压根不进对比模式（实测踩过）。
+            if (!nm && !mm) { sh.textContent = '两个版本完全一致。'; return }
             showCompare(piece, diff)
           })
           .catch(function (e) {

@@ -193,6 +193,30 @@ def main():
     print(f'     只比了公共的 {d["measureCount"]} 小节，{d["diffCount"]} 处差异'
           + ('  ⚠️ 两边小节数不同' if d['truncated'] else ''))
 
+    # ③b 记号差异（力度/速度/文字/连音线…）
+    # 单独一个脚本、单独一个 JSON —— 这样记号那块出问题不会影响音符对比。
+    # ⚠️ 记号改动**完全不碰音符**：实测注入 7 处记号改动后，音符序列
+    #    一个字节都没变，音符对比的结论是「完全一致」—— 那是误导。
+    print()
+    print('  ③b 记号差异（力度/速度/文字/连音线/跳音…）')
+    marksmod = load_module('diff-marks.py', 'marksmod')
+    md = marksmod.build(out_a, out_b, la, lb)
+    out_marks = os.path.join(PIECES, f'{args.pid}.marks.json')
+    with open(out_marks, 'w', encoding='utf-8') as f:
+        json.dump(md, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    if md['markCount']:
+        for m in md['marks']:
+            for k in m['items']:
+                print(f'       第 {m["number"]} 小节　{k["kind"]}：{k["from"]} → {k["to"]}')
+        for m in md['partMarks']:
+            for k in m['items']:
+                print(f'       第 {m["number"]} 小节（{m["trackName"]}）　'
+                      f'{k["kind"]}：{k["from"]} → {k["to"]}')
+        print(f'     共 {md["markCount"]} 处')
+    else:
+        print('     没有记号差异')
+
     # ④ 更新清单
     print()
     print('  ④ 更新 pieces.json')
@@ -214,6 +238,7 @@ def main():
         'file': f'pieces/{os.path.basename(out_a)}',
         'compareFile': f'pieces/{os.path.basename(out_b)}',
         'compare': f'pieces/{os.path.basename(out_diff)}',
+        'marks': f'pieces/{os.path.basename(out_marks)}',
         # 声部数可能差很多，scale 取小一点更保险
         'display': {'scale': 0.7, 'systemPaddingTop': 26, 'systemPaddingBottom': 26,
                     'trackStaffPaddingBetween': 10},
