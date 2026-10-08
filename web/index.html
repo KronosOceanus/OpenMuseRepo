@@ -144,6 +144,20 @@
     stroke: #1f6fd0 !important;
   }
 
+  /* ── 影子光标 ────────────────────────────────────────────────────
+     「没在播的那一边」用不了真光标（给那边的实例设 tickPosition 会
+     触发它自己的自动滚动，滚一截又经同步传回来 —— 就是那个
+     「每按一次按钮往下蹿」）。所以改成**纯视觉**的：从在播那边读当前
+     小节号，在另一边同一个位置画一个半透明色块。
+
+     不碰 AlphaTab 的任何状态，所以没有任何副作用。 */
+  .om-ghost-cursor {
+    position: absolute; pointer-events: none; z-index: 890;
+    background: rgba(74, 158, 255, .12);
+    box-shadow: inset 0 0 0 1.5px rgba(74, 158, 255, .45);
+    border-radius: 3px;
+  }
+
   /* ── 底部控制条 ── */
   footer {
     flex: none; padding: 9px 16px; border-top: 1px solid var(--line);
@@ -244,8 +258,9 @@
 <main id="main"></main>
 
 <footer id="footer" style="display:none">
+  <!-- 只有一个按钮：播放 / 暂停 切换（原来还有个「停止」，去掉了 ——
+       要回到开头拖进度条就行，多一个按钮反而要想"这俩有什么区别"） -->
   <button id="btnPlay" class="primary">▶ 播放</button>
-  <button id="btnStop">■ 停止</button>
   <input id="seek" type="range" min="0" max="1000" value="0">
   <span id="time">0:00 / 0:00</span>
   <span class="listen" id="listen" style="display:none">
@@ -266,7 +281,7 @@
 (function () {
   'use strict'
 
-  var BUILD = 'build-62'
+  var BUILD = 'build-66'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
@@ -356,7 +371,6 @@
     footer: document.getElementById('footer'),
     listen: document.getElementById('listen'),
     play: document.getElementById('btnPlay'),
-    stop: document.getElementById('btnStop'),
     seek: document.getElementById('seek'),
     time: document.getElementById('time'),
     debug: null,
@@ -929,6 +943,7 @@
       var newApi = apiOf(k)
       try { newApi.tickPosition = tick } catch (e) {}
       if (wasPlaying) { try { newApi.play() } catch (e) {} }
+      if (state.hideGhost) state.hideGhost()   // 换边了，影子位置要重算
       paintSide()
       log('切换到「' + sideName(k) + '」，位置 ' + tick + ' tick' +
           (wasPlaying ? '（接着播）' : '（保持暂停）'))
@@ -951,7 +966,9 @@
       var pos = (state.side === 'A' ? apiA : apiB).timePosition || 0
       if (!state.dragging) el.seek.value = String(Math.round(pos))
       el.time.textContent = fmt(pos) + ' / ' + fmt(totalMs)
-      el.play.textContent = apiA.playerState === 1 ? '⏸ 暂停' : '▶ 播放'
+      // ⚠️ 用【当前在播的那一边】判断，别写死 apiA ——
+      //    否则听「改后」时按钮会错显示成「▶ 播放」。
+      el.play.textContent = curApi().playerState === 1 ? '⏸ 暂停' : '▶ 播放'
     }
     state.syncUi = syncUi
 
@@ -999,6 +1016,7 @@
       var on = curApi()
       if (on.playerState === 1) {
         on.pause(); otherApi().pause()
+        if (state.hideGhost) state.hideGhost()
         log('→ pause')
       } else {
         // 起播前把另一个对齐到同一位置（但它不出声）
@@ -1007,12 +1025,8 @@
         log('→ play ' + state.side + ' = ' + ok, ok ? 'ok' : 'warn')
       }
     }
-    el.stop.onclick = function () {
-      curApi().stop(); otherApi().stop()
-      el.play.textContent = '▶ 播放'
-      el.seek.value = '0'
-      el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
-    }
+    // 「停止」按钮去掉了。播放按钮本身就是播放/暂停切换。
+    // 想回到开头：拖进度条到最左（进度条的处理里会同步两边位置）。
     el.seek.oninput = function () { state.dragging = true }
     el.seek.onchange = function () {
       var t = Number(el.seek.value)
@@ -1156,11 +1170,72 @@
      *    结果「选改后时不自动滚动，只有原版会」。
      *    两个实例是镜像的，任何只写一边的逻辑都会漏。
      */
+    // ── 影子光标 ──────────────────────────────────────────────────
+    // 画在**没在播的那一边**，位置取自**在播那边**的当前小节。
+    var ghost = null
+    function ghostHost(sc) {
+      var c = sc.querySelector('.at-cursors')
+      return (c && c.parentElement) || sc
+    }
+
+    /** 显示/隐藏某一栏的**真光标**。
+     *
+     *  ⚠️ 没在播的那一栏，AlphaTab 的光标仍然停在上次的位置上（静止的），
+     *    跟我们的影子光标叠在一起会看着很乱。
+     *    所以：哪一栏在用影子，就把它的真光标藏起来。
+     */
+    function setRealCursor(sc, on) {
+      var c = sc.querySelector('.at-cursors')
+      if (c) c.style.visibility = on ? '' : 'hidden'
+    }
+    function drawGhost(fromApi, toApi, toScore) {
+      if (!fromApi || !toApi || !toApi.boundsLookup) return
+      if (fromApi.playerState !== 1) { hideGhost(); return }
+
+      var tick = 0
+      try { tick = fromApi.tickPosition } catch (e) { return }
+      var bars = (fromApi.score && fromApi.score.masterBars) || []
+      var idx = 0
+      for (var i = 0; i < bars.length; i++) {
+        if (bars[i].start <= tick) idx = i
+        else break
+      }
+      var mb = toApi.boundsLookup.findMasterBarByIndex(idx)
+      if (!mb) return
+      // lineAlignedBounds 是「正好贴着谱线」的那一圈，画光标最合适
+      var b = mb.lineAlignedBounds || mb.realBounds
+      if (!b) return
+
+      var host = ghostHost(toScore)
+      if (!ghost || ghost.parentNode !== host) {
+        if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost)
+        ghost = document.createElement('div')
+        ghost.className = 'om-ghost-cursor'
+        host.appendChild(ghost)
+      }
+      ghost.style.display = ''
+      ghost.style.left = b.x + 'px'
+      ghost.style.top = b.y + 'px'
+      ghost.style.width = b.w + 'px'
+      ghost.style.height = b.h + 'px'
+      setRealCursor(toScore, false)      // 这一栏用影子，真光标藏起来
+    }
+    function hideGhost() {
+      if (ghost) ghost.style.display = 'none'
+      // 影子收起来，真光标恢复（否则暂停后那一栏就彻底没指示了）
+      setRealCursor(scoreA, true)
+      setRealCursor(scoreB, true)
+    }
+    state.hideGhost = hideGhost
+
     function onPosition(side, a, sc) {
       if (state.side !== side) return       // 只有当前在播的那一边才动
+      setRealCursor(sc, true)               // 在播这一栏用真光标
       syncUi()
       scrollToCursor(a, sc)
       syncDiffList(a, list, rowsByMeasure, listCur)
+      // 影子光标：从在播这边读位置，画到另一边
+      drawGhost(a, otherApi(), side === 'A' ? scoreB : scoreA)
     }
     var boundA = false, boundB = false   // 滚动监听只挂一次
 
@@ -1193,6 +1268,7 @@
     // 缩放后延迟重画的兜底（见 applyZoom）
     zoom.redraw = function () {
       if (!diff) return
+      if (state.hideGhost) state.hideGhost()   // 重排后坐标变了，影子先收掉
       clearDiff(scoreA); clearDiff(scoreB)
       drawnA = drawDiff(apiA, diff, scoreA, 'base', 0)
       drawnB = drawDiff(apiB, diff, scoreB, 'head', 0)
@@ -1365,11 +1441,7 @@
       wantPlay = true
       try { log('play() 返回 ' + api.play()) } catch (e) { log('play 异常 ' + e.message, 'bad') }
     }
-    el.stop.onclick = function () {
-      if (!api) return
-      api.stop(); el.play.textContent = '▶ 播放'; el.seek.value = '0'
-      el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
-    }
+    // 同上：没有独立的「停止」按钮了。
     el.seek.oninput = function () { dragging = true }
     el.seek.onchange = function () {
       if (!api) return
