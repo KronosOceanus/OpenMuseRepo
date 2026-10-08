@@ -314,7 +314,7 @@
 (function () {
   'use strict'
 
-  var BUILD = 'build-90'
+  var BUILD = 'build-95'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
@@ -516,8 +516,21 @@
     var mb = api.boundsLookup.findMasterBarByIndex(index)
     if (!mb || !mb.realBounds) return false
     var y = Math.max(0, mb.realBounds.y - 40)   // 上面留一点余量
-    try { scoreEl.scrollTo({ top: y, behavior: 'smooth' }) }
-    catch (e) { scoreEl.scrollTop = y }
+    // ⚠️⚠️ **必须立即滚，不能用 behavior:'smooth'。**
+    //
+    //    平滑滚动是异步动画，而 bindScroll 会在**每一帧**读到中间位置、
+    //    当成"用户滚到了这里"传给对面 —— 对面跟着一串虚假位置乱滚，
+    //    抑制机制也追不上。
+    //
+    //    实测日志（点第 69 小节的记号条目）：
+    //        自动滚动：滚到第 69 小节（y=13680）
+    //        同步 A→B：小节 0 比例 -0.12 → 对面滚到 7    ← 才动了 1%
+    //        同步 A→B：小节 0 比例 -0.11 → 对面滚到 12
+    //        同步 A→B：小节 0 比例 -0.10 → 对面滚到 18
+    //    结果两栏显示的不是同一小节（截图里左 69、右 67）。
+    //
+    //    立即滚的话 scrollTop 一步到位，同步读到的就是最终值。
+    scoreEl.scrollTop = y
     return true
   }
 
@@ -544,7 +557,8 @@
 
     var rows = rowsByMeasure[idx]
     if (!rows || !rows.length) return
-    var row = rows[0]
+    // 用户点过的那一行如果就在本小节 → 保持它；否则跟随播放取第一行
+    var row = (curRef.sel && rows.indexOf(curRef.sel) >= 0) ? curRef.sel : rows[0]
     curRef.row = row
     row.style.background = 'rgba(74, 158, 255, .18)'
 
@@ -593,7 +607,9 @@
     if (y >= top + 20 && y <= top + h - 100) return
 
     try {
-      scoreEl.scrollTo({ top: Math.max(0, y - 40), behavior: 'smooth' })
+      // ⚠️ 同样必须立即滚 —— 理由见 scrollToMeasure 顶上的注释。
+      //    播放时每拍都可能滚一次，用动画会让同步一直读到中间帧，两栏互相推。
+      scoreEl.scrollTop = Math.max(0, y - 40)
       if (DEBUG && !scrollToCursor._said) {
         scrollToCursor._said = true
         log('自动滚动：滚到第 ' + (idx + 1) + ' 小节（y=' + Math.round(y) + '）')
@@ -719,6 +735,37 @@
       log('  谱表区间：' + staffRanges.map(function (r) {
         return 'track' + r.track + '→[' + r.from + ',' + r.to + ')'
       }).join('  '))
+      // ── 诊断：AlphaTab 到底解析到力度记号没有 ──────────────
+      // 力度在 AlphaTab 里挂在 **音符**上（Note.dynamics，0~7）。
+      // 「页面上看不到 mf」有两种可能：
+
+      //   ① AlphaTab 压根没解析进去   → 导入层的问题
+      //   ② 解析进去了但没画出来       → 渲染层的问题
+      // 这两者的解法完全不同，必须先分开。
+      try {
+        var dynFound = []
+        ;(api.score && api.score.tracks || []).forEach(function (tr) {
+          var hits = 0, where = []
+          ;(tr.staves || []).forEach(function (st) {
+            ;(st.bars || []).forEach(function (bar, bi) {
+              ;(bar.voices || []).forEach(function (v) {
+                ;(v.beats || []).forEach(function (b) {
+                  ;(b.notes || []).forEach(function (nt) {
+                    if (nt.dynamics && nt.dynamics !== 0) {
+                      hits++
+                      if (where.length < 3) where.push('小节' + (bi + 1) + ' dyn=' + nt.dynamics)
+                    }
+                  })
+                })
+              })
+            })
+          })
+          if (hits) dynFound.push('#' + tr.index + '(' + (tr.name || '') + ') ' + hits + ' 处 ' + where.join('、'))
+        })
+        log('  力度记号解析结果：' + (dynFound.length ? dynFound.join('　｜　')
+            : '**一处都没有** —— AlphaTab 没解析到任何力度记号'), dynFound.length ? 'ok' : 'bad')
+      } catch (e) { log('  查力度记号失败：' + e.message, 'warn') }
+
       log('  （staves[j].index 是 track 内序号，**不是**全局谱表号：'
           + (api.tracks || []).map(function (t) {
               return '#' + t.index + ':' + (t.staves || []).map(function (st) { return st.index }).join(',')
@@ -1064,7 +1111,15 @@
     bar.appendChild(hd)
 
     var rowsByMeasure = {}     // 小节 index → [行]
-    var listCur = { v: -1, row: null }
+    // sel = 用户**点名点过**的那一行。
+    //
+    // ⚠️ 同一小节下可能有好几行（音符行 + 记号行），它们都挂在
+    //    rowsByMeasure[小节] 里。原来 syncDiffList 固定取 rows[0] ——
+    //    于是「播放中点记号行」之后，播放位置没变、onPosition 继续触发，
+    //    高亮每次都被抢回 rows[0]（音符行），表现就是
+    //    「点了记号行，列表自己跳到音符行」。
+    //    记住用户点的那一行，同小节内优先保持它。
+    var listCur = { v: -1, row: null, sel: null }
     diff.measures.forEach(function (m) {
       var row = document.createElement('div'); row.className = 'cmp-row'
       ;(rowsByMeasure[m.index] = rowsByMeasure[m.index] || []).push(row)
@@ -1088,13 +1143,22 @@
         //    完全看不出哪里错了。
         try {
           var tick = measureStartTick(apiA, m.index)
+          // ⚠️⚠️ 只**定位**，不改变播放/暂停状态。
+          //
+          //    原来这里是 `apiA/B.tickPosition = tick` 紧跟 `curApi().play()` ——
+          //    **无条件起播**。后果：
+          //      · 暂停时点一条 → 突然开始响，得再按一次暂停
+          //      · 正在播时点一条 → 从那一小节的起点重头播，节奏被打断
+          //    点列表项是「带我去那儿看」，不是「开始播放」。
+          //
+          //    seekBothTo 正好是这个语义（点谱面用的也是它）：
+          //    设位置本身不改播放状态 —— 正在播就从新位置续上，暂停就停在原地。
+          var wasPlaying = false
+          try { wasPlaying = curApi().playerState === 1 } catch (e2) {}
+          seekBothTo(tick, '差异列表')
           log('跳到第 ' + m.number + ' 小节（' + (m.trackName || '') +
-              '，tick ' + tick + '，播 ' + state.side + '）')
-          // 两个都设位置但只让选中的那个响
-          // （两个都 play 会同时出声，实测"乱七八糟"）
-          apiA.tickPosition = tick
-          apiB.tickPosition = tick
-          curApi().play()
+              '，tick ' + tick + '，当前听 ' + state.side + '，' +
+              (wasPlaying ? '保持播放' : '保持暂停') + '）')
         } catch (e) {
           log('跳转失败：' + e.message, 'bad')
           return
@@ -1107,6 +1171,7 @@
           var rb = scrollToMeasure(apiB, scoreB, m.index)
           log('  滚到第 ' + m.number + ' 小节：左=' + ra + ' 右=' + rb,
               (ra || rb) ? 'ok' : 'warn')
+          listCur.sel = row        // 记住点的是这一行，别被播放跟随抢回去
           listCur.v = -1
           syncDiffList(curApi(), list, rowsByMeasure, listCur)
         } catch (e) {
@@ -1154,6 +1219,22 @@
         }))
       mkRows.sort(function (a, b) { return a.index - b.index })
 
+      // ⚠️ 把「页面实际要显示什么」打出来。
+      //    出现过「页面显示的和我生成的清单对不上」的情况，
+      //    只能靠这个把两边的口径摆在一起比。
+      if (DEBUG) {
+        log('  记号清单（页面实际显示的 ' + mkRows.length + ' 条）：' +
+            mkRows.map(function (r) {
+              return '第' + r.number + '小节 ' + r.who + ' [' +
+                (r.items || []).map(function (k) {
+                  return k.kind + ' ' + k.from + '→' + k.to
+                }).join('；') + ']'
+            }).join('　｜　'))
+        log('  记号清单原始来源：' + (diff.marks.source || '（无 source 字段）') +
+            '　base=' + diff.marks.base + ' head=' + diff.marks.head +
+            '　markCount=' + diff.marks.markCount)
+      }
+
       var mkSep = document.createElement('div')
       mkSep.className = 'cmp-sep'
       mkSep.textContent = '记号差异（' + mkRows.length + ' 处：力度/速度/文字/连音线/跳音…）'
@@ -1176,14 +1257,17 @@
         row.onclick = function () {
           try {
             var tick = measureStartTick(apiA, mk.index)
-            apiA.tickPosition = tick
-            apiB.tickPosition = tick
-            curApi().play()
+            // ⚠️ 同上：只定位，不改变播放/暂停状态（原来是写死 curApi().play()）
+            var wasPlaying = false
+            try { wasPlaying = curApi().playerState === 1 } catch (e2) {}
+            seekBothTo(tick, '记号条目')
             scrollToMeasure(apiA, scoreA, mk.index)
             scrollToMeasure(apiB, scoreB, mk.index)
+            listCur.sel = row        // 同上：记住是记号行，别被抢回音符行
             listCur.v = -1
             syncDiffList(curApi(), list, rowsByMeasure, listCur)
-            log('记号差异：跳到第 ' + mk.number + ' 小节')
+            log('记号差异：跳到第 ' + mk.number + ' 小节（' +
+                (wasPlaying ? '保持播放' : '保持暂停') + '）')
           } catch (e) { log('跳转失败：' + e.message, 'bad') }
         }
         list.appendChild(row)
@@ -1379,7 +1463,7 @@
       // 记下实际生效的值（可能和请求的不一样：AlphaTab 会吸附到最近的拍）
       var got = null
       try { got = on.tickPosition } catch (e) {}
-      log('点击' + from + '谱面 → 请求 ' + tick + ' tick，实际 ' + got +
+      log('定位（' + from + '）→ 请求 ' + tick + ' tick，实际 ' + got +
           '（' + (was ? '接着播' : '保持暂停') + '）', got === tick ? undefined : 'warn')
     }
     state.seekBothTo = seekBothTo

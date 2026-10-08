@@ -25,11 +25,57 @@ def insert_before_first_note(measure, el):
         measure.append(el)
 
 
+# 力度记号对应的 MIDI 力度（MuseScore 导出时会写 <sound dynamics>）
+VELOCITY = {'ppp': 10, 'pp': 25, 'p': 40, 'mp': 60, 'mf': 75, 'f': 90, 'ff': 105, 'fff': 120}
+
+
+def has_real_note(measure):
+    """这一小节里有没有真的发声音符（不是整小节休止）。
+
+    ⚠️ 注入力度/文字/速度这类**挂在音符上**的记号时，必须挑这种小节。
+       实测 M0203：原来写死「第 5 小节」，而长笛那一小节是整小节休止 ——
+       记号插进去了、差异清单也报得出来，但**页面上什么都不显示**，
+       因为 AlphaTab 的力度是挂在音符上的，没有音符就没有落脚点。
+       （原版小军鼓第 36 小节那处 pp 能显示，就因为后面跟着真音符。）
+    """
+    return any(n.find('rest') is None for n in measure.findall('note'))
+
+
+def pick_measure(measures, prefer):
+    """从 prefer 位置向两边找一个「有真音符」的小节下标。"""
+    n = len(measures)
+    for d in range(n):
+        for i in (prefer + d, prefer - d):
+            if 0 <= i < n and has_real_note(measures[i]):
+                return i
+    return prefer
+
+
 def add_dynamic(measure, val):
+    """加一个力度记号。
+
+    ⚠️ **结构照抄 MuseScore 导出的形式**，不要图省事只写
+       <direction-type><dynamics>。
+
+       实测（M0203）：只写最简形式的话，差异清单里报得出「力度 无 → mf」，
+       但**页面上看不到那个 mf**。MuseScore 导出的形式是这样的：
+
+           <direction-type>
+             <dynamics default-x="5.32" default-y="-40" relative-y="-40">
+               <mp/>
+             </dynamics>
+           </direction-type>
+           <sound dynamics="71.11"/>
+
+       多出来的两部分 —— 定位属性和 <sound dynamics> —— 很可能就是
+       AlphaTab 判断"这个记号要不要画"的依据。照抄它最稳。
+    """
     d = ET.Element('direction', {'placement': 'below'})
     dt = ET.SubElement(d, 'direction-type')
-    dyn = ET.SubElement(dt, 'dynamics')
+    dyn = ET.SubElement(dt, 'dynamics',
+                        {'default-x': '5', 'default-y': '-40', 'relative-y': '-40'})
     ET.SubElement(dyn, val)
+    ET.SubElement(d, 'sound', {'dynamics': str(VELOCITY.get(val, 75))})
     insert_before_first_note(measure, d)
 
 
@@ -51,11 +97,28 @@ def add_tempo(measure, unit, bpm):
     insert_before_first_note(measure, d)
 
 
-def add_wedge(measure, kind):
+def add_wedge(measure, kind, stop_measure=None):
+    """加一个渐强/渐弱**记号对**。
+
+    ⚠️ 必须同时给 <wedge type="stop"/>。
+       只写起点的话，那个记号会**一直延伸到曲末** ——
+       实测右边通篇都在渐强，用户一眼就看出来了。
+       （MusicXML 里渐强渐弱是一对：crescendo/diminuendo 开始，stop 结束。）
+
+    stop_measure 给 None 就不加停（调用方要自己保证有终点）。
+    """
     d = ET.Element('direction', {'placement': 'below'})
     dt = ET.SubElement(d, 'direction-type')
     ET.SubElement(dt, 'wedge', {'type': kind})
     insert_before_first_note(measure, d)
+
+    if stop_measure is not None:
+        d2 = ET.Element('direction', {'placement': 'below'})
+        dt2 = ET.SubElement(d2, 'direction-type')
+        ET.SubElement(dt2, 'wedge', {'type': 'stop'})
+        insert_before_first_note(stop_measure, d2)
+        return True
+    return False
 
 
 def add_notation(measure, tag, nth=0):
@@ -84,22 +147,44 @@ def main():
     measures = root.findall('part')[0].findall('measure')
 
     plan = []
-    if len(measures) > 4:
-        add_dynamic(measures[4], 'mf'); plan.append('第 5 小节　加力度 mf')
-    if len(measures) > 11:
-        add_words(measures[11], 'dolce'); plan.append('第 12 小节　加文字 dolce')
-    if len(measures) > 17:
-        add_tempo(measures[17], 'quarter', 96); plan.append('第 18 小节　改速度 quarter=96')
-    if len(measures) > 22:
-        add_wedge(measures[22], 'crescendo'); plan.append('第 23 小节　加渐强')
-    if len(measures) > 26 and add_notation(measures[26], 'slur'):
-        plan.append('第 27 小节　加连音线')
-    if len(measures) > 30:
-        add_notation(measures[30], 'staccato', 0)
-        add_notation(measures[30], 'staccato', 1)
-        plan.append('第 31 小节　加 2 个跳音')
-    if len(measures) > 35 and add_notation(measures[35], 'accent'):
-        plan.append('第 36 小节　加重音')
+    # ⚠️ 必须挑「那个声部真的在演奏」的小节 —— 记号是挂在音符上的。
+    #    写死 measures[4] 的话，遇到整小节休止就白插了。
+    # ⚠️ 挑点要**依次往后推**，不然遇到"前面一大段都休止"的声部时，
+    #    五处记号会全部挤在同一个（第一个有音符的）小节里。
+    i_dyn = pick_measure(measures, 4)
+    add_dynamic(measures[i_dyn], 'mf'); plan.append(f'第 {i_dyn + 1} 小节　加力度 mf')
+
+    i_wrd = pick_measure(measures, max(11, i_dyn + 4))
+    add_words(measures[i_wrd], 'dolce'); plan.append(f'第 {i_wrd + 1} 小节　加文字 dolce')
+
+    i_tmp = pick_measure(measures, max(17, i_wrd + 4))
+    add_tempo(measures[i_tmp], 'quarter', 96); plan.append(f'第 {i_tmp + 1} 小节　改速度 quarter=96')
+    # 渐强放第 23 小节起、第 27 小节结束。
+    # ⚠️ 结束位置要**按曲子长度自适应** —— 写死 measures[26] 的话，
+    #    短曲子（24 小节的 Dreamy / 世界献礼）会整个跳过、一处都不加。
+    # ⚠️ 渐强需要**两个**有真音符的小节（起点 + 终点）。
+    #    只在"挑一个最近的小节"上做文章是不够的 —— 实测 kyoutsuu 的
+    #    part0（小号）整曲只有 3 个有音符的小节（5、13、21），
+    #    起止都落到 21 上，于是判断不通过、整个渐强被跳过。
+    #    ⟹ 直接从「有音符的小节」列表里取相邻两个，隔多远都行。
+    n_meas = len(measures)
+    sounding = [i for i, mm in enumerate(measures) if has_real_note(mm)]
+    if len(sounding) >= 2:
+        want = max(i_tmp + 3, 22 if n_meas > 27 else max(2, n_meas // 3))
+        k = min(range(len(sounding)), key=lambda j: abs(sounding[j] - want))
+        a = sounding[k]
+        b = sounding[k + 1] if k + 1 < len(sounding) else sounding[k - 1]
+        if a > b:
+            a, b = b, a
+        add_wedge(measures[a], 'crescendo', measures[b])
+        plan.append(f'第 {a + 1}-{b + 1} 小节　加渐强（含结束）')
+    i_st = pick_measure(measures, max(b + 4, 30))
+    if add_notation(measures[i_st], 'staccato', 0):
+        add_notation(measures[i_st], 'staccato', 1)
+        plan.append(f'第 {i_st + 1} 小节　加 2 个跳音')
+    i_ac = pick_measure(measures, i_st + 4)
+    if add_notation(measures[i_ac], 'accent'):
+        plan.append(f'第 {i_ac + 1} 小节　加重音')
 
     tree.write(dst, encoding='utf-8', xml_declaration=True)
 

@@ -42,6 +42,7 @@ import xml.etree.ElementTree as ET
 LABEL = {
     'dynamics': '力度', 'words': '文字', 'tempo': '速度', 'wedge': '渐强渐弱',
     'pedal': '踏板', 'rehearsal': '排练号', 'lyrics': '歌词',
+
     'slur': '连音线', 'tied': '延音线', 'staccato': '跳音', 'accent': '重音',
     'strong-accent': '强重音', 'tenuto': '保持音', 'fermata': '延长号',
     'trill-mark': '颤音', 'mordent': '波音', 'turn': '回音',
@@ -142,10 +143,50 @@ def merge_directions(parts_measures, mi):
     return merged
 
 
+# ⚠️ 力度的比较基线不是「无」，而是 **f**。
+#
+#    AlphaTab 的 `Beat.dynamics` 默认值是 `DynamicValue.F`（forte）——
+#    见 min.js 里的 `dynamics=o.F`，它会传给每个音符。
+#    也就是说：**谱上没写力度记号的地方，实际是按 f 演奏的**，
+#    而且 AlphaTab 会把这个默认值也画在谱面上。
+#
+#    实测 M02+03：原版第 69 小节没有任何力度记号，但页面上显示着一个 `f`；
+#    我注入 mf 之后右边显示 `mf`。清单报「无 → mf」，
+#    而用户看到的是「f → mf」—— 两边永远对不上，因为基线不同。
+#
+#    从"会听到什么"的角度看，`f → mf` 才是对的。
+DEFAULT_DYNAMIC = 'f'
+
+
+# 某些记号的值本身也要翻译 —— 光有类型名不够，用户看的是「渐强」不是「crescendo」
+VALUE_LABEL = {
+    'crescendo': '渐强', 'diminuendo': '渐弱', 'stop': '结束',
+    'start': '开始', 'continue': '继续',
+}
+
+
+def tr_val(v):
+    return VALUE_LABEL.get(v, v)
+
+
 def compare(sa, sb):
     out = []
     for k in sorted(set(sa) | set(sb)):
         va, vb = sa.get(k), sb.get(k)
+
+        # 力度：缺失的一侧按 AlphaTab 的默认值 f 算
+        if k == 'dynamics':
+            va2 = va if va else [DEFAULT_DYNAMIC]
+            vb2 = vb if vb else [DEFAULT_DYNAMIC]
+            if va2 == vb2:
+                continue
+            out.append({
+                'kind': LABEL[k],
+                'from': '、'.join(tr_val(str(x)) for x in va2) + ('' if va else '（默认）'),
+                'to': '、'.join(tr_val(str(x)) for x in vb2) + ('' if vb else '（默认）'),
+            })
+            continue
+
         if va == vb:
             continue
         if k == 'notations':
@@ -156,8 +197,8 @@ def compare(sa, sb):
                     out.append({'kind': LABEL.get(kk, kk), 'from': a or '无', 'to': b or '无'})
         else:
             out.append({'kind': LABEL.get(k, k),
-                        'from': '、'.join(map(str, va)) if va else '无',
-                        'to': '、'.join(map(str, vb)) if vb else '无'})
+                        'from': '、'.join(tr_val(str(x)) for x in va) if va else '无',
+                        'to': '、'.join(tr_val(str(x)) for x in vb) if vb else '无'})
     return out
 
 

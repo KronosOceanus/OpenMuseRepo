@@ -205,7 +205,19 @@ def main():
                 desc = f'删音　{nm(old)} → 休止符'
 
         elif kind == 'add':
-            rs = rests_can_add(m)
+            # ⚠️ 「加音」需要一个现成的休止符来占位。
+            #    挑中的小节可能一个休止符都没有（实测 M02+03 这种密集谱，
+            #    13 处「加音」全部失败、顺延成了改音高）。
+            #    ⟹ 那就**在这个声部里换一个有空隙的小节**。
+            m_use, rs = m, rests_can_add(m)
+            if not rs:
+                for mi2 in by_part.get(pi, []):
+                    cand_m = part.findall('measure')[mi2]
+                    r2 = rests_can_add(cand_m)
+                    if r2:
+                        m_use, rs, mi = cand_m, r2, mi2
+                        notes = pitched(cand_m)
+                        break
             if rs and notes:
                 base = midi_of(notes[0])
                 new = max(36, min(96, base - 5))
