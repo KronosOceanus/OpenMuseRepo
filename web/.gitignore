@@ -11,6 +11,10 @@
 pieces/*.musicxml
 pieces.json
 
+# 差异清单：由 diff-musicxml.py 生成，和曲库配套。
+# pieces.json 既然是本地文件，这些也就没有消费者，一并忽略。
+pieces/*.diff.json
+
 # 模板照常提交（别人 clone 下来知道 pieces.json 长什么样）
 !pieces.example.json
 

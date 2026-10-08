@@ -6,19 +6,28 @@
 <title>OpenMuse</title>
 
 <!--
-  乐谱播放页
+  OpenMuse 乐谱播放 / 对比页
 
-  ── 三条硬规则（都是踩出来的，改之前先读 README）────────────────
+  ── 单曲模式 ──────────────────────────────────────────────────────
+      一个 AlphaTab 实例，看谱 + 播放。
 
-  ① 音源必须 .sf2。.sf3 会被 AlphaTab 静默拒绝 —— 一个事件都不触发。
-  ② 位置事件叫 playerPositionChanged，不叫 positionChanged。
-     后者在 API 上是 undefined，.on() 抛异常会中断后面所有代码
-     （包括按钮绑定），表现是「点了毫无反应」。
-  ③ UI 的 addEventListener 必须排在所有库事件之前，且每个库事件
-     注册都要单独 try/catch —— 否则一个不存在的事件就能拖垮整页。
+  ── 对比模式（左右分栏）──────────────────────────────────────────
+      pieces.json 里给一首曲子加：
+        "compareFile": "pieces/xxx-mod.musicxml",   ← 对比版本
+        "compare":     "pieces/xxx.diff.json"       ← 差异清单
 
-  依赖全部在 vendor/ 下，不走 CDN。
-  加了 ?debug 会显示诊断面板。详见 README.md。
+      左边渲染 file（基准），右边渲染 compareFile（对比）。
+      基准侧把改动处标红，对比侧标绿 —— 像 GitHub 的 diff，
+      只不过红绿各自长在自己那一版谱子上。
+
+      **为什么左右分栏，而不是把两版摞成一份谱：**
+        摞叠要先把两个版本合成一份文件（merge-versions.mjs）。
+        声部一多那份文件的结构就出问题 —— 实测 11 个声部的曲子
+        合并后 22 个 part，MuseScore 直接段错误，转不出 MusicXML。
+        分栏只需各自的 MusicXML，压根不用合并，而且结构不同的
+        两个版本也能比。
+
+  ── 依赖全部在 vendor/ 下，不走 CDN。加 ?debug 显示诊断面板。──
 -->
 
 <style>
@@ -47,14 +56,10 @@
 
   main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
-  /* ⚠️ min-height: 0 不能省 —— flex 子项默认 min-height:auto，
-     内容一长就撑开、把下面的控制条挤出屏幕。 */
-  #score { flex: 1; min-height: 0; overflow: auto; background: #fff; padding: 8px 0; }
-
   #hint { padding: 40px 20px; text-align: center; color: var(--dim); white-space: pre-wrap; }
   #hint.error { color: #ff6b6b; }
 
-  /* 曲目列表 */
+  /* ── 曲目列表 ── */
   #list { padding: 24px; overflow: auto; }
   #list h2 { font-size: 13px; color: var(--dim); font-weight: 500; margin: 0 0 12px; }
   .card {
@@ -65,14 +70,88 @@
   .card:hover { border-color: var(--accent); }
   .card .t { font-size: 15px; font-weight: 600; }
   .card .m { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .card .badge {
+    display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 4px;
+    background: var(--accent); color: #fff; font-size: 11px; vertical-align: 2px;
+  }
 
+  /* ── 单曲：一个谱面区 ──
+     min-height:0 不能省 —— flex 子项默认 min-height:auto，内容一长就撑开，
+     把下面的控制条挤出屏幕。 */
+  #score { flex: 1; min-height: 0; overflow: auto; background: #fff; padding: 8px 0; }
+
+  /* ── 对比：左右分栏 ── */
+  #cmpWrap { flex: 1; min-height: 0; display: flex; gap: 1px; background: var(--line); }
+  .pane { flex: 1 1 50%; min-width: 0; display: flex; flex-direction: column; background: #fff; }
+  .pane-hd {
+    flex: none; padding: 5px 12px; font-size: 12px; font-weight: 600;
+    background: var(--panel); color: var(--dim); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .pane-hd .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .pane-hd .dot.red   { background: #e13737; }
+  .pane-hd .dot.green { background: #1ea546; }
+  .pane-hd .cnt { margin-left: auto; font-weight: 400; }
+  .pane-score { flex: 1; min-height: 0; overflow: auto; padding: 4px 0; }
+
+  /* ── 红绿标注 ──
+     和 AlphaTab 自己的光标一样插在同一个父元素里，绝对定位，
+     所以坐标系和 noteHeadBounds 是同一套。 */
+  .om-diff-layer { position: absolute; inset: 0; pointer-events: none; z-index: 900; }
+  .om-diff-mark { position: absolute; pointer-events: none; }
+
+  /* 四种风格，用 ?mark=xxx 切换：
+       circle 椭圆（默认）· glow 柔光 · box 方框 · underline 下划线 */
+  .om-diff-mark.circle { border-radius: 50%; }
+  .om-diff-mark.glow   { border-radius: 5px; }
+  .om-diff-mark.box    { border-radius: 4px; }
+  .om-diff-mark.underline { border-radius: 0; border-bottom: 2.5px solid; background: transparent !important; }
+
+  .om-diff-mark.red.circle, .om-diff-mark.red.glow { background: rgba(255, 70, 70, .28); }
+  .om-diff-mark.green.circle, .om-diff-mark.green.glow { background: rgba(45, 190, 90, .28); }
+  .om-diff-mark.red.box {
+    background: rgba(255, 70, 70, .16);
+    box-shadow: inset 0 0 0 1.5px rgba(225, 55, 55, .95);
+  }
+  .om-diff-mark.green.box {
+    background: rgba(45, 190, 90, .16);
+    box-shadow: inset 0 0 0 1.5px rgba(30, 165, 70, .95);
+  }
+  .om-diff-mark.red.underline   { border-color: rgba(225, 55, 55, .95); }
+  .om-diff-mark.green.underline { border-color: rgba(30, 165, 70, .95); }
+
+  /* ── 播放光标 ────────────────────────────────────────────────────
+     ⚠️ 这几行不能省。AlphaTab 只往容器里插 .at-cursors / .at-cursor-bar /
+        .at-cursor-beat 这些**空 div**，颜色和粗细全靠页面自己给 ——
+        库本身不注入任何样式。
+
+        重写页面时漏掉这段，表现就是「完全没有光标」：
+        元素建出来了、坐标也对，但背景透明 → 看不见。
+        （阶段 1 有这几行，所以那时光标是正常的。）
+
+     AlphaTab 把定位写成内联样式，所以这里必须 !important 才盖得住。 */
+  .at-cursor-bar {
+    background: rgba(74, 158, 255, .25) !important;
+  }
+  .at-cursor-beat {
+    background: #4a9eff !important;
+    width: 3px !important;
+    box-shadow: 0 0 4px rgba(74, 158, 255, .85);
+  }
+  /* 正在播放的音符高亮 */
+  .at-highlight * {
+    fill: #1f6fd0 !important;
+    stroke: #1f6fd0 !important;
+  }
+
+  /* ── 底部控制条 ── */
   footer {
-    flex: none; padding: 10px 16px; border-top: 1px solid var(--line);
-    background: var(--panel); display: flex; align-items: center; gap: 12px;
+    flex: none; padding: 9px 16px; border-top: 1px solid var(--line);
+    background: var(--panel); display: flex; align-items: center; gap: 10px;
   }
   button {
     background: var(--line); color: var(--text); border: 0; border-radius: 6px;
-    padding: 7px 14px; font-size: 14px; cursor: pointer;
+    padding: 6px 13px; font-size: 14px; cursor: pointer;
   }
   button:hover { background: #383842; }
   button.primary { background: var(--accent); color: #fff; }
@@ -80,35 +159,74 @@
   #seek { flex: 1; accent-color: var(--accent); }
   #time { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 92px; text-align: right; }
 
-  /* 诊断面板：只有 ?debug 时才创建 */
+  .listen { display: flex; align-items: center; gap: 5px; }
+  .listen .lbl { color: var(--dim); font-size: 12px; }
+  .listen button { padding: 4px 10px; font-size: 12px; }
+  .listen button.on { background: var(--accent); color: #fff; }
+  .listen button.off { background: transparent; color: var(--dim); box-shadow: inset 0 0 0 1px var(--line); }
+
+  /* ── 差异列表（可折叠，默认收起，不抢乐谱的地方）── */
+  #cmp { flex: none; border-top: 1px solid var(--line); background: var(--panel); }
+  #cmp .hd {
+    padding: 6px 16px; font-size: 12px; color: var(--dim);
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  #cmp .hd b { color: var(--text); font-weight: 600; }
+  #cmp .hd .toggle { margin-left: auto; background: transparent; color: var(--accent); padding: 3px 8px; font-size: 12px; }
+  #cmp .hd .toggle:hover { background: var(--line); }
+  #cmp .body { max-height: 30vh; overflow: auto; border-top: 1px solid var(--line); }
+  #cmp .body.hide { display: none; }
+  .cmp-row {
+    padding: 6px 16px; cursor: pointer; font-size: 13px;
+    display: flex; gap: 10px; align-items: baseline;
+  }
+  .cmp-row:hover { background: #26262e; }
+  .cmp-row .no { color: var(--dim); min-width: 58px; font-variant-numeric: tabular-nums; }
+  .cmp-row .who { color: var(--dim); min-width: 84px; font-size: 12px; }
+  .cmp-row .rm { color: #ff7b7b; }
+  .cmp-row .ad { color: #6ee06e; }
+  .cmp-row .arrow { color: var(--dim); }
+
+  /* ── 缩放按钮（右下角）── */
+  #zoom {
+    position: fixed; right: 16px; bottom: 64px; z-index: 2000;
+    display: flex; align-items: center; gap: 2px;
+    background: rgba(30, 30, 36, .92); border: 1px solid var(--line);
+    border-radius: 8px; padding: 3px; box-shadow: 0 2px 10px rgba(0,0,0,.35);
+  }
+  #zoom button {
+    width: 32px; height: 30px; padding: 0; font-size: 17px; line-height: 1;
+    background: transparent; color: var(--text);
+  }
+  #zoom button:hover { background: var(--line); }
+  #zoom #zVal {
+    min-width: 46px; text-align: center; font-size: 12px; color: var(--dim);
+    font-variant-numeric: tabular-nums; cursor: pointer;
+  }
+  #zoom #zVal:hover { color: var(--text); }
+  #zoom .zsep { width: 1px; height: 20px; background: var(--line); margin: 0 3px; }
+  /* 自动滚动关掉时那个按钮变暗 */
+  #zoom #zScroll.off { opacity: .4; }
+
+  #debugWrap {
+    flex: none; background: #101014; border-top: 1px solid var(--line);
+  }
+  #dbgHd {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    padding: 4px 16px; font-size: 11px; color: var(--dim);
+    user-select: none;
+  }
+  #dbgHd:hover { color: var(--text); }
+  #dbgHd .dbgToggle { margin-left: auto; color: var(--accent); }
+  #debugWrap.collapsed #debug { display: none; }
   #debug {
-    flex: none; max-height: 26vh; overflow: auto; padding: 8px 16px;
-    background: #101014; border-top: 1px solid var(--line);
+    max-height: 24vh; overflow: auto; padding: 4px 16px 8px;
     font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     color: #9a9aa6; white-space: pre-wrap;
   }
   #debug .ok   { color: #4ade80; }
   #debug .bad  { color: #ff6b6b; }
   #debug .warn { color: #fbbf24; }
-
-  /* ── 播放光标 ────────────────────────────────────────────────────
-     AlphaTab 往容器里插 .at-cursors（absolute; z-index:1000），
-     里面是 .at-cursor-bar（当前小节的色块）和 .at-cursor-beat（当前拍的位置线）。
-     它给的默认样式比较淡，而且颜色写在内联样式上 ——
-     想改必须用 !important 才盖得住。 */
-  .at-cursor-bar {
-    background: rgba(74, 158, 255, .22) !important;
-  }
-  .at-cursor-beat {
-    background: #4a9eff !important;
-    width: 3px !important;
-    box-shadow: 0 0 4px rgba(74, 158, 255, .8);
-  }
-  /* 正在播放的音符高亮 */
-  .at-highlight * {
-    fill: #1f6fd0 !important;
-    stroke: #1f6fd0 !important;
-  }
 </style>
 </head>
 
@@ -130,146 +248,94 @@
   <button id="btnStop">■ 停止</button>
   <input id="seek" type="range" min="0" max="1000" value="0">
   <span id="time">0:00 / 0:00</span>
+  <span class="listen" id="listen" style="display:none">
+    <span class="lbl">听：</span>
+  </span>
 </footer>
+
+<div id="zoom" style="display:none">
+  <button id="zOut" title="缩小">−</button>
+  <span id="zVal" title="点一下恢复 100%">100%</span>
+  <button id="zIn" title="放大">+</button>
+  <span class="zsep"></span>
+  <button id="zScroll" title="播放时是否自动滚动">⇅</button>
+</div>
 
 <script src="vendor/alphaTab.min.js"></script>
 <script>
 (function () {
   'use strict'
 
-  var BUILD = 'build-16'
+  var BUILD = 'build-62'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
-  var el = {
-    main:   document.getElementById('main'),
-    title:  document.getElementById('title'),
-    sub:    document.getElementById('sub'),
-    back:   document.getElementById('back'),
-    status: document.getElementById('status'),
-    footer: document.getElementById('footer'),
-    play: null, stop: null, seek: null, time: null,
-    debug: null,
-  }
+  // 标记样式与微调。默认值都是实调出来的。
+  //   ?mark=circle|glow|box|underline
+  //   ?mds=尺寸倍数（只对 circle 有效）  ?mdx/?mdy=像素偏移
+  var MARK = (function () {
+    var v = params.get('mark')
+    return ['circle', 'glow', 'box', 'underline'].indexOf(v) >= 0 ? v : 'circle'
+  })()
+  // ⚠️ mdy 的来历：AlphaTab 的 noteHeadBounds 有个不一致 ——
+  //    y 按「音符头」算（音符头中心 - 半高），h 却用「整个音符」的高。
+  //    于是 y + h/2 不等于音符头中心，框会整体偏上。实测偏约 8px。
+  var MARK_SCALE = Number(params.get('mds') || 1.35)
+  var MARK_DX = Number(params.get('mdx') || 0)
+  var MARK_DY = Number(params.get('mdy') || 8)
 
-  // ── 日志 ────────────────────────────────────────────────────────
-  // 只有 ?debug 时才建面板并输出 —— 正常使用时页面上不出现调试信息。
-  var t0 = Date.now()
-  if (DEBUG) {
-    el.debug = document.createElement('div')
-    el.debug.id = 'debug'
-    document.body.appendChild(el.debug)
-  }
-  function log(msg, cls) {
-    if (!el.debug) return
-    var d = document.createElement('div')
-    if (cls) d.className = cls
-    d.textContent = ((Date.now() - t0) / 1000).toFixed(2) + 's  ' + msg
-    el.debug.appendChild(d)
-    el.debug.scrollTop = el.debug.scrollHeight
-    console.log('[openmuse]', msg)
-  }
-
-  function fmt(ms) {
-    if (!isFinite(ms) || ms < 0) ms = 0
-    var s = Math.floor(ms / 1000)
-    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
-  }
-
-  function setHint(text, isError) {
-    el.main.innerHTML = ''
-    if (!text) return
-    var d = document.createElement('div')
-    d.id = 'hint'
-    if (isError) d.className = 'error'
-    d.textContent = text
-    el.main.appendChild(d)
-  }
-
-  log('=== ' + BUILD + ' ===  ' + location.href)
-
-  // ═════════════════════════════════════════════════════════════════
-  //  1. 曲目列表
-  // ═════════════════════════════════════════════════════════════════
-
-  function loadManifest() {
-    return fetch('pieces.json', { cache: 'no-store' })
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status)
-        return r.json()
-      })
-      .then(function (j) { return Array.isArray(j.pieces) ? j.pieces : [] })
-  }
-
-  function showList(pieces) {
-    el.main.innerHTML = ''
-    var wrap = document.createElement('div')
-    wrap.id = 'list'
-
-    var h = document.createElement('h2')
-    h.textContent = pieces.length + ' 首曲子'
-    wrap.appendChild(h)
-
-    if (pieces.length === 0) {
-      var p = document.createElement('div')
-      p.style.color = '#8a8a96'
-      p.textContent = 'pieces.json 里还没有曲子。加一首见 README。'
-      wrap.appendChild(p)
-    }
-
-    pieces.forEach(function (it) {
-      var a = document.createElement('a')
-      a.className = 'card'
-      a.href = '?piece=' + encodeURIComponent(it.id) + (DEBUG ? '&debug' : '')
-      var t = document.createElement('div'); t.className = 't'; t.textContent = it.title || it.id
-      var m = document.createElement('div'); m.className = 'm'; m.textContent = it.file
-      a.appendChild(t); a.appendChild(m)
-      wrap.appendChild(a)
-    })
-
-    el.main.appendChild(wrap)
-    el.status.textContent = ''
-    document.title = 'OpenMuse'
-  }
-
-  // ═════════════════════════════════════════════════════════════════
-  //  排版参数
+  // ⚠️ 这几个是**像素**偏移，必须按当前缩放等比放大。
+  //    否则放到 200% 时，音符头变了一倍大、而 +8px 的偏移还是一样 ——
+  //    标记就会从音符头上滑开（实测：缩放后跑位）。
+  // ── 音频输出模式 ────────────────────────────────────────────────
   //
-  //  AlphaTab 的默认排版偏「挤」，跟 MuseScore 差得比较明显。这几项
-  //  是最影响观感的，都能用 URL 参数当场调 —— 调好了再改这里的默认值。
+  //  AlphaTab 默认用 AudioWorklet（PlayerOutputMode.WebAudioAudioWorklets），
+  //  但它有个已知的竞态问题（github.com/CoderLine/alphaTab/issues/2561
+  //  「playback freezes due to race condition between async worklet
+  //   creation and sample delivery」）。
   //
-  //    参数        默认    作用
-  //    scale       0.5     整体缩放（字/音符大小）
-  //    stretch     1       小节拉伸力度。越小越挤在左边、越大越铺满整行
-  //                        ← 「小节长度乱」主要就是它
-  //    justify     1       最后一行也两端对齐（默认只对齐满行）
-  //                        ← 「换行不清楚」有一部分是它
-  //    bars        -1      每行固定几个小节，-1 = 自动。设了换行就可预测
-  //    syspad      60      行与行之间的间距（AlphaTab 默认 10）
-  //    staffpad    24      不同声部之间的间距（AlphaTab 默认 5，多乐器谱子偏挤）
-  //    padx/pady   24/20   页面边距（默认 35/35）
+  //  单实例时只是偶发卡顿；**左右并排是两个实例，两个 worklet 同时抢
+  //  音频线程**，一拖进度条就很容易乱。
   //
-  //  例：?piece=kyoutsuu&stretch=3&syspad=22&staffpad=18&debug
-  // ═════════════════════════════════════════════════════════════════
-
-  function numParam(name, dflt) {
-    var v = params.get(name)
-    if (v === null || v === '') return dflt
-    var n = Number(v)
-    return isNaN(n) ? dflt : n
-  }
-  function boolParam(name, dflt) {
-    var v = params.get(name)
-    if (v === null) return dflt
-    return v === '1' || v === 'true' || v === 'yes'
+  //  ⟹ 对比模式默认改用 legacy 的 ScriptProcessor（值 1）。
+  //     ?output=worklet 可以强制切回去对比。
+  var OUTPUT = (function () {
+    var v = params.get('output')
+    if (v === 'worklet') return 0
+    if (v === 'script') return 1
+    return null   // 自动：对比模式用 1，单曲用 0
+  })()
+  function outputMode(isCompare) {
+    if (OUTPUT !== null) return OUTPUT
+    return isCompare ? 1 : 0
   }
 
-  //  默认值来自实调（不是猜的）：
-  //    stretch=1  syspad=60  scale=0.5  staffpad=24
-  //  观感是「谱面小巧、行与行之间疏朗」，11 声部的总谱也看得清。
-  //  想微调还是用 URL 参数，不用改这里。
+  // ── 自动滚动开关 ────────────────────────────────────────────────
+  //  AlphaTab 的 scrollMode：
+  //     0 Off         不自动滚
+  //     1 Continuous  光标一动就滚
+  //     2 OffScreen   光标出屏才滚
+  //     3 Smooth      平滑持续滚
+  //  默认是 1。有些人觉得播放时页面自己动很烦，所以给个开关。
+  //  URL 用 ?scroll=0 / ?scroll=1 也能指定。
+  var AUTO_SCROLL = (function () {
+    var v = params.get('scroll')
+    if (v === '0' || v === 'off') return false
+    if (v === '1' || v === 'on') return true
+    return true
+  })()
+  function autoScroll() { return AUTO_SCROLL }
+
+  var zoomRatio = 1
+  function markDx() { return MARK_DX * zoomRatio }
+  function markDy() { return MARK_DY * zoomRatio }
+
+  // 排版参数（默认值是在 11 声部总谱上实调出来的，见 web/README.md）
+  function numParam(n, d) { var v = params.get(n); if (v === null || v === '') return d; var x = Number(v); return isNaN(x) ? d : x }
+  function boolParam(n, d) { var v = params.get(n); if (v === null) return d; return v === '1' || v === 'true' || v === 'yes' }
+
   var DISPLAY = {
-    layoutMode: 0,                                   // 0 = Page（上下连续页面式）
+    layoutMode: 0,
     scale: numParam('scale', 0.5),
     stretchForce: numParam('stretch', 1),
     justifyLastSystem: boolParam('justify', true),
@@ -281,264 +347,1190 @@
     padding: [numParam('padx', 24), numParam('pady', 20)],
   }
 
-  // ═════════════════════════════════════════════════════════════════
-  //  2. 播放器
-  // ═════════════════════════════════════════════════════════════════
-
-  /** 把 piece.display 里的键翻成 AlphaTab 的设置名，合并到默认值上。 */
-  function displayFor(piece) {
-    var d = {}
-    Object.keys(DISPLAY).forEach(function (k) { d[k] = DISPLAY[k] })
-    var ov = (piece && piece.display) || {}
-    if (ov.scale != null) d.scale = ov.scale
-    if (ov.stretchForce != null) d.stretchForce = ov.stretchForce
-    if (ov.justifyLastSystem != null) d.justifyLastSystem = ov.justifyLastSystem
-    if (ov.barsPerRow != null) d.barsPerRow = ov.barsPerRow
-    if (ov.systemPaddingTop != null) d.systemPaddingTop = ov.systemPaddingTop
-    if (ov.systemPaddingBottom != null) d.systemPaddingBottom = ov.systemPaddingBottom
-    if (ov.trackStaffPaddingBetween != null) d.trackStaffPaddingBetween = ov.trackStaffPaddingBetween
-    if (ov.padding != null) d.padding = ov.padding
-    return d
+  var el = {
+    main: document.getElementById('main'),
+    title: document.getElementById('title'),
+    sub: document.getElementById('sub'),
+    back: document.getElementById('back'),
+    status: document.getElementById('status'),
+    footer: document.getElementById('footer'),
+    listen: document.getElementById('listen'),
+    play: document.getElementById('btnPlay'),
+    stop: document.getElementById('btnStop'),
+    seek: document.getElementById('seek'),
+    time: document.getElementById('time'),
+    debug: null,
   }
 
-  function showPlayer(piece) {
+  // ── 日志：只在 ?debug 时建面板 ──
+  var t0 = Date.now()
+  if (DEBUG) {
+    // 外面套一层，默认折起来 —— 平时看谱时它太长，需要时再展开。
+    var wrap = document.createElement('div')
+    wrap.id = 'debugWrap'
+    wrap.className = 'collapsed'
+    var hd = document.createElement('div')
+    hd.id = 'dbgHd'
+    var cnt = document.createElement('span')
+    cnt.id = 'dbgCnt'
+    hd.innerHTML = '<span>诊断</span>'
+    hd.appendChild(cnt)
+    var tg = document.createElement('span')
+    tg.className = 'dbgToggle'
+    tg.textContent = '▲ 展开'
+    hd.appendChild(tg)
+    hd.onclick = function () {
+      var c = wrap.className.indexOf('collapsed') >= 0
+      wrap.className = c ? '' : 'collapsed'
+      tg.textContent = c ? '▼ 收起' : '▲ 展开'
+    }
+    el.debug = document.createElement('div')
+    el.debug.id = 'debug'
+    wrap.appendChild(hd)
+    wrap.appendChild(el.debug)
+    document.body.appendChild(wrap)
+  }
+  var dbgCount = 0
+  function log(msg, cls) {
+    if (!el.debug) return
+    var d = document.createElement('div')
+    if (cls) d.className = cls
+    d.textContent = ((Date.now() - t0) / 1000).toFixed(2) + 's  ' + msg
+    el.debug.appendChild(d)
+    el.debug.scrollTop = el.debug.scrollHeight
+    dbgCount++
+    var c = document.getElementById('dbgCnt')
+    if (c) c.textContent = '（' + dbgCount + ' 条）'
+    console.log('[openmuse]', msg)
+  }
+
+  function fmt(ms) {
+    if (!isFinite(ms) || ms < 0) ms = 0
+    var s = Math.floor(ms / 1000)
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+  }
+  function esc(t) {
+    return String(t).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
+    })
+  }
+  function setHint(text, isErr) {
+    el.main.innerHTML = ''
+    if (!text) return
+    var d = document.createElement('div')
+    d.id = 'hint'
+    if (isErr) d.className = 'error'
+    d.textContent = text
+    el.main.appendChild(d)
+  }
+
+  log('=== ' + BUILD + ' ===  ' + location.href)
+  log('标记样式：' + MARK + (MARK === 'circle' ? '  尺寸×' + MARK_SCALE : '') +
+      '  偏移(' + MARK_DX + ',' + MARK_DY + ')')
+
+  // ═════════════════════════════════════════════════════════════════
+  //  AlphaTab 事件注册（每个单独包 —— 某个事件在当前版本不存在时
+  //  只跳过它，不让整页挂掉）
+  //
+  //  ⚠️ 这条规则是踩出来的：早期写法里某个事件不存在，.on() 抛异常，
+  //     后面所有代码（包括按钮绑定）都不执行 —— 表现是「点击毫无反应」，
+  //     而且连日志都打不出来。见 web/README.md 的坑 ②⑦。
+  // ═════════════════════════════════════════════════════════════════
+  /** 让差异列表跟着播放走：高亮当前小节那一行，并把它滚进视野。
+   *
+   *  注意不能用 row.scrollIntoView() —— 那会把**所有**可滚动祖先都滚一遍，
+   *  连带把乐谱也滚了。这里只手动改列表自己的 scrollTop。
+   */
+  function syncDiffList(api, panel, rowsByMeasure, curRef) {
+    if (!panel || !api || api.playerState !== 1) return
+    var tick = 0
+    try { tick = api.tickPosition } catch (e) { return }
+    var bars = (api.score && api.score.masterBars) || []
+    var idx = 0
+    for (var i = 0; i < bars.length; i++) {
+      if (bars[i].start <= tick) idx = i
+      else break
+    }
+    if (curRef.v === idx) return
+    curRef.v = idx
+
+    // 先清掉上一次的高亮
+    if (curRef.row) { curRef.row.style.background = ''; curRef.row = null }
+
+    var rows = rowsByMeasure[idx]
+    if (!rows || !rows.length) return
+    var row = rows[0]
+    curRef.row = row
+    row.style.background = 'rgba(74, 158, 255, .18)'
+
+    // 已经可见就不动，免得每拍抖一下
+    var pr = panel.getBoundingClientRect(), rr = row.getBoundingClientRect()
+    if (rr.top >= pr.top && rr.bottom <= pr.bottom) return
+    // 把它挪到列表中间（只动列表，不动别处）
+    var d = rr.top - pr.top
+    panel.scrollTo({
+      top: Math.max(0, panel.scrollTop + d - panel.clientHeight / 2 + rr.height / 2),
+      behavior: 'smooth',
+    })
+  }
+
+  /** 自己实现的「自动滚动到光标」。
+   *
+   *  为什么不用 AlphaTab 的 scrollMode：
+   *    实测它一旦开过就关不干净 —— 关掉之后点任何按钮仍会往下滚，
+   *    而且滚的位置不是光标所在处。与其去斗它的内部状态，
+   *    不如让它永远不滚（scrollMode: 0），滚动完全由这里控制。
+   *
+   *  行为：只在光标快要出屏时才滚，滚到光标上方留一点余量。
+   *  这样既能跟着走，又不会每一拍都动一下。
+   */
+  function scrollToCursor(api, scoreEl) {
+    if (!AUTO_SCROLL || !api || !api.boundsLookup) return
+    if (api.playerState !== 1) return          // 不在播就不滚
+    var tick = 0
+    try { tick = api.tickPosition } catch (e) { return }
+    var bars = (api.score && api.score.masterBars) || []
+    if (!bars.length) return
+
+    // 当前 tick 落在哪一小节
+    var idx = 0
+    for (var i = 0; i < bars.length; i++) {
+      if (bars[i].start <= tick) idx = i
+      else break
+    }
+    var mb = api.boundsLookup.findMasterBarByIndex(idx)
+    if (!mb || !mb.realBounds) return
+
+    var y = mb.realBounds.y
+    var top = scoreEl.scrollTop
+    var h = scoreEl.clientHeight
+    // 光标还在可视区里（下方留 100px 余量）就不动 —— 否则每拍都滚一下很烦
+    if (y >= top + 20 && y <= top + h - 100) return
+
+    try {
+      scoreEl.scrollTo({ top: Math.max(0, y - 40), behavior: 'smooth' })
+      if (DEBUG && !scrollToCursor._said) {
+        scrollToCursor._said = true
+        log('自动滚动：滚到第 ' + (idx + 1) + ' 小节（y=' + Math.round(y) + '）')
+      }
+    } catch (e) {
+      scoreEl.scrollTop = Math.max(0, y - 40)
+    }
+  }
+
+  /** 查光标元素在不在、尺寸多少。
+   *  AlphaTab 的光标是 .at-cursors 里的几个空 div，靠内联样式定位 ——
+   *  「看不见光标」可能是没建、也可能是建了但尺寸是 0，得分清楚。
+   */
+  function reportCursor(scoreEl, tag) {
+    if (!DEBUG) return
+    var c = scoreEl.querySelector('.at-cursors')
+    var bar = scoreEl.querySelector('.at-cursor-bar')
+    var beat = scoreEl.querySelector('.at-cursor-beat')
+    if (!c) { log('光标[' + tag + '] ❌ 没有 .at-cursors（没建出来）', 'warn'); return }
+    var r1 = bar ? bar.getBoundingClientRect() : null
+    var r2 = beat ? beat.getBoundingClientRect() : null
+    log('光标[' + tag + '] .at-cursors=有  bar=' +
+        (r1 ? Math.round(r1.width) + '×' + Math.round(r1.height) : '无') +
+        '  beat=' + (r2 ? Math.round(r2.width) + '×' + Math.round(r2.height) : '无'))
+  }
+
+  function regAll(api, handlers) {
+    Object.keys(handlers).forEach(function (name) {
+      var ev = api[name]
+      if (!ev || typeof ev.on !== 'function') {
+        log('✗ ' + name + ' 不存在，跳过', 'warn')
+        return
+      }
+      try { ev.on(handlers[name]); log('✓ ' + name) }
+      catch (e) { log('✗ ' + name + ' 注册失败：' + e.message, 'bad') }
+    })
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  //  红绿标注
+  // ═════════════════════════════════════════════════════════════════
+
+  /** 在改动处叠标记。side='base' 标红（改掉的），side='head' 标绿（新增的）。
+   *
+   *  匹配用「音高 + 小节内 tick」两个键 —— 只按音高会把没变的同音也染上
+   *  （实测一个小节里有三个 D5，只改了一个）。
+   */
+  function drawDiff(api, diff, scoreEl, side, trackOffset) {
+    if (!api || !api.boundsLookup) {
+      if (DEBUG) log('  ✗ ' + side + '：boundsLookup 还是空的', 'warn')
+      return 0
+    }
+    var key = side === 'base' ? 'removed' : 'added'
+    var color = side === 'base' ? 'red' : 'green'
+
+    var cursors = scoreEl.querySelector('.at-cursors')
+    var host = (cursors && cursors.parentElement) || scoreEl
+
+    var layer = document.createElement('div')
+    layer.className = 'om-diff-layer'
+    var n = 0
+
+    // ⚠️ 谱表 → track 的映射不能靠「声部数整除」推。
+    //    一个 track 可能占多个谱表（钢琴 2 个），所以 11 个 track 对应
+    //    12 个谱表 —— 12/11=1.09，整除推算从第 9 个 track 起就偏了，
+    //    标记会落到隔壁乐器上。
+    //
+    //    正确做法：用 api.tracks[i].staves 建一张「谱表 index → track index」
+    //    的表，然后按 MasterBarBounds.bars[bi].bar.staff.index 查。
+    var staffToTrack = {}
+    ;(api.tracks || []).forEach(function (t) {
+      ;(t.staves || []).forEach(function (st) { staffToTrack[st.index] = t.index })
+    })
+    var hasMap = Object.keys(staffToTrack).length > 0
+
+    // 按小节汇总，省得每个条目都查一次坐标
+    var byMeasure = {}
+    diff.measures.forEach(function (m) {
+      (byMeasure[m.index] = byMeasure[m.index] || []).push(m)
+    })
+
+    Object.keys(byMeasure).forEach(function (idx) {
+      var mb = api.boundsLookup.findMasterBarByIndex(Number(idx))
+      if (!mb) return
+      var bars = mb.bars || []
+
+      byMeasure[idx].forEach(function (m) {
+        if (m.track == null) return
+        // 合并谱里对比版的 track 要加偏移（base 用 t，head 用 N+t）
+        // 左右分栏：两个实例各自从 track 0 开始，offset=0
+        // 上下摞叠：一个实例含 2N 个 track，head 要加 N
+        var wantTrack = m.track + (trackOffset || 0)
+        var from = 0, to = bars.length
+        var how = '整除推算'
+        if (hasMap) {
+          var f2 = -1, t2 = -1
+          for (var bi0 = 0; bi0 < bars.length; bi0++) {
+            var stf = bars[bi0].bar && bars[bi0].bar.staff
+            var ti = stf ? staffToTrack[stf.index] : undefined
+            if (ti === wantTrack) { if (f2 < 0) f2 = bi0; t2 = bi0 + 1 }
+          }
+          if (f2 >= 0) { from = f2; to = t2; how = '按 staff→track 表' }
+          else {
+            // ⚠️ 查不到不能直接 return —— 那样一个小节都标不出来。
+            //    退回按声部数整除推算（一个 track 一个谱表时是对的），
+            //    并记下来，方便排查映射为什么失效。
+            var perTrack = bars.length / (((api.tracks || []).length) || 1)
+            from = Math.floor(wantTrack * perTrack)
+            to = Math.min(bars.length, Math.max(from + 1, Math.floor((wantTrack + 1) * perTrack)))
+            how = '整除推算（映射没查到）'
+            if (DEBUG && !drawDiff._warned) {
+              drawDiff._warned = true
+              log('  ⚠️ staff→track 映射没命中（wantTrack=' + wantTrack +
+                  '，表里有 ' + Object.keys(staffToTrack).length + ' 项）→ 退回整除推算', 'warn')
+            }
+          }
+        }
+        var want = m[key]
+        if (!want || !want.length) return
+
+        // 先把这个 track 的所有音符头收集起来，再分两轮匹配：
+        //   第一轮  音高 + 小节内 tick 都要对得上（精确，避免同音误标）
+        //   第二轮  某小节严格匹配一个都没中时，退化成只按音高
+        //          （tick 的换算万一有偏差，不至于整个小节都标不出来）
+        var pool = []
+        for (var bi = from; bi < to; bi++) {
+          var bb = bars[bi]
+          ;(bb.beats || []).forEach(function (bt) {
+            var tick = bt.beat ? bt.beat.displayStart : null
+            ;(bt.notes || []).forEach(function (nb) {
+              pool.push({ nb: nb, tick: tick, pitch: nb.note ? nb.note.realValue : null })
+            })
+          })
+        }
+
+        var hits = pool.filter(function (o) {
+          return want.some(function (x) { return x.pitch === o.pitch && x.tick === o.tick })
+        })
+        var relaxed = false
+        if (!hits.length) {
+          hits = pool.filter(function (o) {
+            return want.some(function (x) { return x.pitch === o.pitch })
+          })
+          relaxed = hits.length > 0
+        }
+        if (DEBUG && !drawDiff._saidHow) {
+          drawDiff._saidHow = true
+          log('  标注定位方式：' + how)
+        }
+        if (relaxed && DEBUG) {
+          log('    小节 ' + m.number + ' track ' + m.track + '：tick 没对上，退化成按音高标了 ' + hits.length + ' 处', 'warn')
+        }
+
+        hits.forEach(function (o) {
+              var nb = o.nb
+              var b = nb.noteHeadBounds
+              if (!b) return
+              var d = document.createElement('div')
+              d.className = 'om-diff-mark ' + MARK + ' ' + color
+              var cx = b.x + b.w / 2 + markDx()
+              var cy = b.y + b.h / 2 + markDy()
+              if (MARK === 'underline') {
+                d.style.left = (b.x - 2) + 'px'
+                d.style.top = (b.y + b.h - 1) + 'px'
+                d.style.width = (b.w + 4) + 'px'
+                d.style.height = '2px'
+              } else if (MARK === 'circle') {
+                var rw = Math.max(b.w, 7) * MARK_SCALE
+                var rh = Math.max(b.h, 7) * MARK_SCALE
+                d.style.left = (cx - rw / 2) + 'px'
+                d.style.top = (cy - rh / 2) + 'px'
+                d.style.width = rw + 'px'
+                d.style.height = rh + 'px'
+              } else {
+                d.style.left = (b.x - 3 + markDx()) + 'px'
+                d.style.top = (b.y - 3 + markDy()) + 'px'
+                d.style.width = (b.w + 6) + 'px'
+                d.style.height = (b.h + 6) + 'px'
+              }
+              layer.appendChild(d)
+              n++
+        })
+      })
+    })
+
+    host.appendChild(layer)
+    return n
+  }
+
+  /** 清掉标注层。合并谱要叠两批（红先、绿后），叠之前先清一次。 */
+  function clearDiff(scoreEl) {
+    var cursors = scoreEl.querySelector('.at-cursors')
+    var host = (cursors && cursors.parentElement) || scoreEl
+    Array.prototype.slice.call(host.querySelectorAll('.om-diff-layer')).forEach(function (l) {
+      l.parentNode.removeChild(l)
+    })
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  //  对比模式：左右分栏
+  // ═════════════════════════════════════════════════════════════════
+
+  function loadJson(url) {
+    return fetch(url, { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
+  }
+
+  var state = null   // 对比模式的全局状态（供底部控制条用）
+
+  function showCompare(piece, diff) {
     el.title.textContent = piece.title || piece.id
-    el.sub.textContent = '乐谱播放'
+    el.sub.textContent = '左右对照'
     el.back.style.display = ''
     el.footer.style.display = ''
     document.title = (piece.title || piece.id) + ' — OpenMuse'
 
-    // 建出播放器需要的 DOM
+    // 两个渲染区
     el.main.innerHTML = ''
-    var score = document.createElement('div')
-    score.id = 'score'
-    el.main.appendChild(score)
+    var wrap = document.createElement('div')
+    wrap.id = 'cmpWrap'
 
-    el.play = document.getElementById('btnPlay')
-    el.stop = document.getElementById('btnStop')
-    el.seek = document.getElementById('seek')
-    el.time = document.getElementById('time')
+    function mkPane(label, color, cnt) {
+      var pane = document.createElement('div')
+      pane.className = 'pane'
+      var hd = document.createElement('div')
+      hd.className = 'pane-hd'
+      var dot = document.createElement('span'); dot.className = 'dot ' + color
+      var t = document.createElement('span'); t.textContent = label
+      var c = document.createElement('span'); c.className = 'cnt'; c.textContent = cnt
+      hd.appendChild(dot); hd.appendChild(t); hd.appendChild(c)
+      var sc = document.createElement('div')
+      sc.className = 'pane-score'
+      pane.appendChild(hd); pane.appendChild(sc)
+      wrap.appendChild(pane)
+      return sc
+    }
 
-    // ── ⚠️ UI 注册必须排在所有库事件之前（见文件顶部规则 ③）──────
-    var api = null
-    var wantPlay = false
-    var totalMs = 0
-    var dragging = false
-    var posTicks = 0
+    var scoreA = mkPane(diff.base + '（左）', 'red', diff.diffCount + ' 处改动标红')
+    var scoreB = mkPane(diff.head + '（右）', 'green', diff.diffCount + ' 处改动标绿')
+    el.main.appendChild(wrap)
+    log('左右两个面板已建（' + diff.base + ' / ' + diff.head + '）', 'ok')
+    log('  左栏容器 ' + scoreA.clientWidth + '×' + scoreA.clientHeight +
+        '   右栏容器 ' + scoreB.clientWidth + '×' + scoreB.clientHeight)
 
-    document.addEventListener('click', function (ev) {
-      log('点击 <' + (ev.target.tagName || '?').toLowerCase() +
-          (ev.target.id ? ' id=' + ev.target.id : '') + '>')
-    }, true)
+    // ── 差异列表（可折叠）──
+    var bar = document.createElement('div')
+    bar.id = 'cmp'
+    var hd = document.createElement('div'); hd.className = 'hd'
+    hd.innerHTML = '<span><b>' + diff.diffCount + '</b> 处差异　' +
+                   esc(diff.base) + ' ↔ ' + esc(diff.head) + '</span>'
 
-    el.play.addEventListener('click', function () {
-      log('播放按钮被点击')
-      if (!api) return
-      if (api.playerState === 1) { api.pause(); return }
-      wantPlay = true
-      try {
-        var ok = api.play()
-        log('play() 返回 ' + ok, ok ? 'ok' : 'warn')
-      } catch (e) {
-        log('play() 抛异常 ' + e.message, 'bad')
+    var list = document.createElement('div')
+    list.className = 'body hide'
+    var toggle = document.createElement('button')
+    toggle.className = 'toggle'
+    function setOpen(open) {
+      list.className = 'body' + (open ? '' : ' hide')
+      toggle.textContent = open ? '▼ 收起' : '▲ 展开 ' + diff.measures.length + ' 条'
+    }
+    toggle.onclick = function () { setOpen(list.className.indexOf('hide') >= 0) }
+    setOpen(false)
+    hd.appendChild(toggle)
+    bar.appendChild(hd)
+
+    var rowsByMeasure = {}     // 小节 index → [行]
+    var listCur = { v: -1, row: null }
+    diff.measures.forEach(function (m) {
+      var row = document.createElement('div'); row.className = 'cmp-row'
+      ;(rowsByMeasure[m.index] = rowsByMeasure[m.index] || []).push(row)
+      var no = document.createElement('span'); no.className = 'no'
+      // diff 里的 index 是 0 基，谱上印的号码在 number
+      no.textContent = '第 ' + m.number + ' 小节'
+      var who = document.createElement('span'); who.className = 'who'
+      who.textContent = m.trackName || ''
+      var body = document.createElement('span')
+      var rm = m.removed.map(function (x) { return x.name }).join(' ')
+      var ad = m.added.map(function (x) { return x.name }).join(' ')
+      body.innerHTML = '<span class="rm">' + esc(rm) + '</span>' +
+                       '<span class="arrow"> → </span>' +
+                       '<span class="ad">' + esc(ad) + '</span>'
+      row.appendChild(no); row.appendChild(who); row.appendChild(body)
+      row.onclick = function () {
+        var tick = measureStartTick(state.apiA, m.index)
+        log('跳到第 ' + m.number + ' 小节（' + (m.trackName || '') +
+            '，tick ' + tick + '，播 ' + state.side + '）')
+        try {
+          // ⚠️ 两个都 play 会同时出声 —— 实测"乱七八糟"。
+          //    只让当前选中的那个响，另一个只同步位置。
+          state.apiA.tickPosition = tick
+          state.apiB.tickPosition = tick
+          curApi().play()
+        } catch (e) { log('跳转失败：' + e.message, 'bad') }
       }
+      list.appendChild(row)
     })
+    bar.appendChild(list)
+    el.main.appendChild(bar)
 
-    el.stop.addEventListener('click', function () {
-      if (!api) return
-      api.stop()
+    // ── 两个实例 ──
+    function mkSettings(file) {
+      return {
+        core: {
+          file: file,
+          fontDirectory: 'vendor/',
+          // 全部声部（默认只渲染第一个 —— 多乐器谱子会只显示一件乐器）
+          tracks: 'all',
+          // ⚠️ 必须关掉懒加载：分块渲染时没渲染的部分**没有 boundsLookup**，
+          //    叠不了标记。
+          enableLazyLoading: false,
+          // ⚠️⚠️ 必须打开，否则 BoundsLookup 里**不含每个音符的位置**
+          //    （默认出于性能考虑不收集），叠色时一个坐标都拿不到。
+          includeNoteBounds: true,
+        },
+        display: Object.assign({}, piece.display ? Object.assign({}, DISPLAY, piece.display) : DISPLAY, {
+          // ⚠️⚠️ 对比模式下**必须把每行小节数固定住**。
+          //
+          //   两个版本各自自动排版的话，每行装几个小节会不一样，
+          //   于是「同一小节」在两边的行内位置不同 —— 滚动同步就永远
+          //   差最多一行（实测验算：A 第 20 小节在第 20-23 行的中间，
+          //   B 第 20 小节却在第 18-20 行的末尾，按行内比例落下去对不上）。
+          //
+          //   固定成同一个值之后，两边的行结构完全一致，
+          //   按「行 + 行内比例」同步就是精确的。
+          //   ?bars=N 可以改（默认 4）。
+          barsPerRow: numParam('bars', 4),
+        }),
+        player: {
+          enablePlayer: true,
+          // ⚠️⚠️ playerMode 是**另一个**开关，默认是 Disabled(0)。
+          //    光标建不建靠 `playerMode !== Disabled && enableCursor`
+          //    （见 min.js 的 get _y()）。只设 enablePlayer 不够 ——
+          //    实测光标不出现。
+          //    1 = EnabledAutomatic（有伴奏轨就用，否则用合成器）
+          playerMode: 1,
+          // ⚠️ 必须 sf2。sf3 会被 AlphaTab 静默拒绝（一个事件都不触发）。
+          soundFont: 'vendor/sonivox.sf2',
+          scrollElement: scoreA,
+          // 对比模式是双实例，默认避开 AudioWorklet 的竞态问题
+          outputMode: outputMode(true),
+          // ⚠️ 关掉内置的「点击谱面跳转」—— 它只管自己被点的那一个实例。
+          //    左右并排需要「点哪边都跳两边」，所以自己处理 beatMouseDown。
+          enableUserInteraction: false,
+          // 播放光标。默认就是开的，这里显式写出来 —— 对比模式下
+          // 曾经因为没写而看不见光标，排查时全靠这两行确认状态。
+          enableCursor: true,
+          enableAnimatedBeatCursor: true,
+          enableElementHighlighting: true,
+          // ⚠️ **永远 0** —— AlphaTab 的自动滚动一旦开过就关不干净：
+          //    实测「开一次 → 再关 → 点任何按钮都往下滚，而且不是滚到光标」。
+          //    所以不用它的，自动滚动由 scrollToCursor() 自己实现。
+          scrollMode: 0,
+        },
+      }
+    }
+
+    var apiA = null, apiB = null
+    try {
+      apiA = new alphaTab.AlphaTabApi(scoreA, mkSettings(piece.file))
+      log('实例 A 创建成功（' + piece.file + '，输出模式 ' +
+          (outputMode(true) ? 'ScriptProcessor' : 'AudioWorklet') + '）', 'ok')
+    } catch (e) { setHint('左栏初始化失败：' + e.message, true); return }
+    try {
+      var sb = mkSettings(piece.compareFile)
+      sb.player.scrollElement = scoreB
+      apiB = new alphaTab.AlphaTabApi(scoreB, sb)
+      log('实例 B 创建成功（' + piece.compareFile + '）', 'ok')
+    } catch (e) { setHint('右栏初始化失败：' + e.message, true); return }
+
+    state = { apiA: apiA, apiB: apiB, diff: diff, scoreA: scoreA, scoreB: scoreB, mutes: { A: false, B: false } }
+    setupZoom([apiA, apiB])
+    zoom.onScrollToggle = applyScrollMode
+    applyScrollMode()
+
+    // ── 听哪一边：**单选** ──────────────────────────────────────────
+    //
+    // ⚠️ 为什么不做「两个都听」：
+    //    两个 AlphaTab 实例各有自己的音频时钟和缓冲，apiA.play() 和
+    //    apiB.play() 不是原子操作，中间差的那几毫秒/几十毫秒消不掉。
+    //    同时播出来就是"乱七八糟" —— 实测如此。
+    //    而且就算对得齐，两个版本重叠着听也分不清谁是谁。
+    //
+    //    所以同一时刻只让一个响，切换时从**同一个 tick** 续上，
+    //    这样 A/B 对比是干净的。
+    state.side = 'A'
+    var listenBtns = {}
+
+    function apiOf(k) { return k === 'A' ? state.apiA : state.apiB }
+    function sideName(k) { return k === 'A' ? diff.base : diff.head }
+
+    function paintSide() {
+      Object.keys(listenBtns).forEach(function (k) {
+        var b = listenBtns[k]
+        var active = (k === state.side)
+        b.textContent = (active ? '🔊 ' : '· ') + sideName(k)
+        b.className = active ? 'on' : 'off'
+      })
+    }
+
+    /** 切换听哪一版。**进度要从旧的那版交给新的那版。**
+     *
+     *  ⚠️ 这里的方向很容易写反。曾经写成「把原来那版拉到新版的位置」——
+     *    结果就是切换后各自保持自己的进度，两边对不上。
+     *    正确的顺序：切之前先记下当前 tick，切之后再设给新选中的那个。
+     */
+    function switchSide(k) {
+      if (k === state.side) return
+      var oldApi = apiOf(state.side)
+      var tick = 0
+      var wasPlaying = false
+      try {
+        tick = oldApi.tickPosition || 0
+        wasPlaying = oldApi.playerState === 1
+      } catch (e) {}
+      if (wasPlaying) { try { oldApi.pause() } catch (e) {} }
+
+      state.side = k
+      applyScrollMode()          // 自动滚动跟着换边
+      var newApi = apiOf(k)
+      try { newApi.tickPosition = tick } catch (e) {}
+      if (wasPlaying) { try { newApi.play() } catch (e) {} }
+      paintSide()
+      log('切换到「' + sideName(k) + '」，位置 ' + tick + ' tick' +
+          (wasPlaying ? '（接着播）' : '（保持暂停）'))
+    }
+    state.switchSide = switchSide
+
+    ;[['A', diff.base], ['B', diff.head]].forEach(function (pr) {
+      var b = document.createElement('button')
+      b.title = '切到这一版（从同一个位置接着听）'
+      b.onclick = function () { switchSide(pr[0]) }
+      listenBtns[pr[0]] = b
+      el.listen.appendChild(b)
+    })
+    paintSide()
+    el.listen.style.display = ''
+
+    // ── 底部控制条 ──
+    var totalMs = 0
+    function syncUi() {
+      var pos = (state.side === 'A' ? apiA : apiB).timePosition || 0
+      if (!state.dragging) el.seek.value = String(Math.round(pos))
+      el.time.textContent = fmt(pos) + ' / ' + fmt(totalMs)
+      el.play.textContent = apiA.playerState === 1 ? '⏸ 暂停' : '▶ 播放'
+    }
+    state.syncUi = syncUi
+
+    function curApi() { return state.side === 'A' ? state.apiA : state.apiB }
+    function otherApi() { return state.side === 'A' ? state.apiB : state.apiA }
+
+    /** 把两个实例都定位到同一 tick。
+     *
+     *  用途：在任意一边点谱面，两边一起跳 —— 这样你听到的那一版
+     *  会跟着你点的地方走，而不是只有被点的那一版动了。
+     *  （内置的开启状态下只管被点的那个实例，所以上面关掉了它。）
+     */
+    function seekBothTo(tick, from) {
+      var on = curApi(), off = otherApi()
+      var was = false
+      try { was = on.playerState === 1 } catch (e) {}
+
+      // ⚠️ **不要 pause → 设位置 → play。**
+      //
+      //    tickPosition 的 setter 和 play() 都是往 worker postMessage，
+      //    是异步的。实测这么写时 play 会从「pause 时记住的位置」续上，
+      //    把中间那条设位置吞掉 —— 表现是「点了进度条卡一下但不动，
+      //    继续从原处播」。（暂停状态点则正常，因为没有 play 来覆盖。）
+      //
+      //    直接设位置就行：setter 会把 seek 消息发给 worker，
+      //    正在播的话它会从新位置继续。
+      try { on.tickPosition = tick; off.tickPosition = tick } catch (e) {
+        log('设位置失败：' + e.message, 'bad')
+      }
+
+      // ⚠️ **暂停状态下设 tickPosition 不会触发 playerPositionChanged**，
+      //    进度条也就不会动 —— 表现是「点了没反应，还停在原位」。
+      //    所以这里手动刷一次 UI。
+      try { syncUi() } catch (e) {}
+
+      // 记下实际生效的值（可能和请求的不一样：AlphaTab 会吸附到最近的拍）
+      var got = null
+      try { got = on.tickPosition } catch (e) {}
+      log('点击' + from + '谱面 → 请求 ' + tick + ' tick，实际 ' + got +
+          '（' + (was ? '接着播' : '保持暂停') + '）', got === tick ? undefined : 'warn')
+    }
+    state.seekBothTo = seekBothTo
+
+    el.play.onclick = function () {
+      var on = curApi()
+      if (on.playerState === 1) {
+        on.pause(); otherApi().pause()
+        log('→ pause')
+      } else {
+        // 起播前把另一个对齐到同一位置（但它不出声）
+        try { otherApi().tickPosition = on.tickPosition } catch (e) {}
+        var ok = on.play()
+        log('→ play ' + state.side + ' = ' + ok, ok ? 'ok' : 'warn')
+      }
+    }
+    el.stop.onclick = function () {
+      curApi().stop(); otherApi().stop()
       el.play.textContent = '▶ 播放'
       el.seek.value = '0'
       el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
-    })
-
-    el.seek.addEventListener('input', function () { dragging = true })
-    el.seek.addEventListener('change', function () {
-      if (api) api.timePosition = Number(el.seek.value)
-      dragging = false
-    })
-
+    }
+    el.seek.oninput = function () { state.dragging = true }
+    el.seek.onchange = function () {
+      var t = Number(el.seek.value)
+      state.dragging = false
+      var on = curApi(), off = otherApi()
+      var was = false
+      try { was = on.playerState === 1 } catch (e) {}
+      // 和点谱面同理：不要 pause → 设位置 → play（play 会覆盖掉设的位置）
+      try { on.timePosition = t; off.timePosition = t } catch (e) {}
+      setTimeout(syncUi, 0)   // 设位置是异步的，稍后刷一次 UI
+      log('进度条跳到 ' + fmt(t) + '（' + state.side + ' 在播：' + was + '）')
+    }
     document.addEventListener('keydown', function (ev) {
       if (ev.code !== 'Space' || ev.target === el.seek) return
       ev.preventDefault()
       el.play.click()
     })
 
-    log('UI 控件已注册', 'ok')
+    // ── 滚动同步 ──
+    //
+    // 两个版本的排版不可能一样（小节宽度、每行几个小节都可能不同），
+    // 所以**不能按像素比例同步**，得按乐谱结构对齐。
+    //
+    // 做法：读「视口顶部落在哪一小节、以及在该行内的比例」，
+    // 在对面找到包含同一小节的那一行，按同样的比例落下去。
+    //
+    // 早期版本只按小节顶边对齐（scrollTop = 小节.realBounds.y），
+    // 丢掉行内偏移 —— 慢慢滚时对面就是一格一格跳的，看着"不完全同步"。
 
-    if (typeof alphaTab === 'undefined') {
-      setHint('vendor/alphaTab.min.js 没加载上 —— 确认用 http:// 打开（不是 file://）。', true)
-      log('alphaTab 未定义', 'bad')
-      return
+    /** 读出「当前视口顶部」在乐谱里的位置。 */
+    function readPos(api, scoreEl) {
+      if (!api.boundsLookup) return null
+      var y = scoreEl.scrollTop
+      var systems = api.boundsLookup.staffSystems || []
+      if (!systems.length) return null
+
+      // ⚠️ 第一行**上面**还有一块——标题 / 作曲者那些 <credit>。
+      //    它不属于任何一个 staffSystem，所以按行算比例时会掉进"第一行"
+      //    的分支、frac 被夹成 0，对面就被拉到第一行顶边，标题被推出去 ——
+      //    表现是「向上拉时一边有标题一边没有」。
+      //
+      //    所以：滚到第一行上方时，用**负比例**表达"比第一行高多少"，
+      //    对面照着往回退同样的比例。两边的标题高度一样（同一份源文件），
+      //    所以这样能对齐。
+      var s0 = systems[0].realBounds
+      if (s0 && y < s0.y) {
+        var b0 = systems[0].bars || []
+        return {
+          firstBar: b0.length ? b0[0].index : 0,
+          frac: s0.h > 0 ? (y - s0.y) / s0.h : 0,   // 负值
+        }
+      }
+
+      for (var i = 0; i < systems.length; i++) {
+        var rb = systems[i].realBounds
+        if (!rb) continue
+        var last = (i === systems.length - 1)
+        if (y < rb.y + rb.h || last) {
+          // 不再夹到 [0,1] —— 上面那个分支已经处理了负值，
+          // 这里 y >= rb.y 所以本来就是非负的。
+          var frac = rb.h > 0 ? (y - rb.y) / rb.h : 0
+          var bars = systems[i].bars || []
+          return { firstBar: bars.length ? bars[0].index : 0, frac: frac }
+        }
+      }
+      return null
     }
+
+    /** 把「某个小节 + 行内比例」落到对面的滚动位置上。 */
+    function writePos(api, scoreEl, pos) {
+      if (!api.boundsLookup || !pos) return null
+      var systems = api.boundsLookup.staffSystems || []
+      if (!systems.length) return null
+
+      // 找包含 pos.firstBar 的那一行 —— 对面每行装的小节数可能不一样，
+      // 所以按「小节落在哪一行的区间里」找，而不是按行号。
+      var target = null
+      for (var i = 0; i < systems.length; i++) {
+        var bars = systems[i].bars || []
+        if (!bars.length) continue
+        var lo = bars[0].index
+        var hi = bars[bars.length - 1].index
+        if (pos.firstBar >= lo && pos.firstBar <= hi) { target = systems[i]; break }
+        if (lo > pos.firstBar) { target = systems[i]; break }   // 落到了两行之间
+      }
+      if (!target) target = systems[systems.length - 1]
+
+      var rb = target.realBounds
+      if (!rb) return null
+      // frac 可能是负的（在标题区），结果会小于 rb.y —— 正好把对面
+      // 也退到它自己的标题区，两边就对齐了。
+      var want = Math.round(rb.y + pos.frac * rb.h)
+      scoreEl.scrollTop = want
+      return want
+    }
+
+    // 回设抑制：自己设过去的滚动位置，反过来不要再触发一次同步，
+    // 否则两边会互相推着抖。以前用一个 60ms 的锁，快滚时会丢事件 ——
+    // 改成记住"我设了多少"，对面滚到这个值时忽略。
+    var suppress = { A: null, B: null }
+    function bindScroll(fromEl, fromApi, toEl, toApi, fromKey) {
+      var queued = false
+      var said = false
+
+      fromEl.addEventListener('scroll', function () {
+        // 这一步是对方设过来的，不是我滚的 → 忽略
+        if (suppress[fromKey] !== null && Math.abs(fromEl.scrollTop - suppress[fromKey]) <= 1) {
+          suppress[fromKey] = null
+          return
+        }
+        suppress[fromKey] = null
+        if (queued) return
+        queued = true
+        requestAnimationFrame(function () {
+          queued = false
+          var pos = readPos(fromApi, fromEl)
+          if (!pos) return
+          var toKey = fromKey === 'A' ? 'B' : 'A'
+          var set = writePos(toApi, toEl, pos)
+          if (set !== null) suppress[toKey] = set
+          if (DEBUG && (!said || said < 4)) {
+            said = (said || 0) + 1
+            log('同步 ' + fromKey + '→' + toKey + '：小节 ' + pos.firstBar +
+                ' 比例 ' + pos.frac.toFixed(2) + ' → 对面滚到 ' + set)
+          }
+          if (!said && DEBUG) {
+            said = 1
+            log('滚动同步已接上（' + fromKey + ' 驱动，按行 + 行内比例）')
+          }
+        })
+      }, { passive: true })
+    }
+
+    var drawnA = 0, drawnB = 0
+    var posTicksA = 0, posTicksB = 0
+
+    /** 位置事件统一处理。
+     *
+     *  ⚠️ 两边的处理必须**完全一样**，只是各管自己那一栏。
+     *    之前 A 的处理器里写了自动滚动和列表跟随，B 的只写了 syncUi ——
+     *    结果「选改后时不自动滚动，只有原版会」。
+     *    两个实例是镜像的，任何只写一边的逻辑都会漏。
+     */
+    function onPosition(side, a, sc) {
+      if (state.side !== side) return       // 只有当前在播的那一边才动
+      syncUi()
+      scrollToCursor(a, sc)
+      syncDiffList(a, list, rowsByMeasure, listCur)
+    }
+    var boundA = false, boundB = false   // 滚动监听只挂一次
+
+    /** 按「哪一边在播」分配自动滚动。
+     *
+     *  只有正在播的那一边主动滚动，另一边始终 scrollMode 0。
+     *
+     *  为什么要限制：两边都开的话，任何让另一边位置变化的操作
+     *  （切换时设 tickPosition）都会让它自己滚一截，而滚动同步
+     *  又把这个滚动传给在播那边 —— 表现是「每按一次按钮两边都往下蹿」。
+     *  只留一边有滚动权，就不会互相推。
+     */
+    // AlphaTab 的 scrollMode 恒为 0（见 mkSettings 注释），
+    // 所以这里不再改它的设置。换边时只要让 scrollToCursor 认新的在播方
+    // 即可 —— 它每次都用 curApi() 取。
+    function applyScrollMode() {
+      log('自动滚动：' + (AUTO_SCROLL ? '开（' + state.side + ' 在播时生效）' : '关'))
+    }
+    state.applyScrollMode = applyScrollMode
+
+    // 不做「光标镜像」。
+    //
+    // 原本想让没在播的那一边也有光标，做法是把在播那边的 tick 定期
+    // 同步过去。但设位置会让那一边**自己的自动滚动**触发，滚一截；
+    // 滚动同步又把在播那边带着滚 —— 表现是「每按一次按钮两边都往下蹿」。
+    //
+    // 试过只给在播那边滚动权（能压住大部分），但设位置本身仍可能
+    // 引发一次 scrollIntoView。所以干脆不做：
+    // **光标只在在播的那一边出现**，这也符合直觉 —— 声音在哪边，光标在哪边。
+    // 缩放后延迟重画的兜底（见 applyZoom）
+    zoom.redraw = function () {
+      if (!diff) return
+      clearDiff(scoreA); clearDiff(scoreB)
+      drawnA = drawDiff(apiA, diff, scoreA, 'base', 0)
+      drawnB = drawDiff(apiB, diff, scoreB, 'head', 0)
+      log('缩放后重画：左 ' + drawnA + ' 处，右 ' + drawnB + ' 处',
+          (drawnA && drawnB) ? 'ok' : 'warn')
+    }
+    regAll(apiA, {
+      scoreLoaded: function () { log('A scoreLoaded ✅', 'ok') },
+      soundFontLoaded: function () {
+        log('A 音源就绪', 'ok')
+        totalMs = apiA.endTime || 0
+        el.seek.max = String(Math.max(1, Math.round(totalMs)))
+        el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
+      },
+      playerPositionChanged: function () {
+        onPosition('A', apiA, scoreA)
+        if (posTicksA++ === 0) reportCursor(scoreA, '左·播放中')
+      },
+      playerFinished: function () { el.play.textContent = '▶ 播放'; el.seek.value = '0' },
+      settingsUpdated: function () { log('A settingsUpdated（重排开始）') },
+      beatMouseDown: function (beat) {
+        if (beat && typeof beat.absoluteDisplayStart === 'number') {
+          seekBothTo(beat.absoluteDisplayStart, diff.base)
+        }
+      },
+      // ⚠️ 用 postRenderFinished：renderFinished 触发时 boundsLookup 还是 null
+      postRenderFinished: function () {
+        reportCursor(scoreA, '左·渲染后')
+        drawnA = drawDiff(apiA, diff, scoreA, 'base', 0)
+        log('左栏渲染完 · 标红 ' + drawnA + ' 处 · 容器 ' +
+            scoreA.clientWidth + '×' + scoreA.clientHeight, drawnA ? 'ok' : 'warn')
+        // ⚠️ 第 5 个参数是「抑制键」，必须是 'A'/'B' 这种纯标识。
+        //    （曾经传 'A→B'，而函数里拿它当 suppress 的键用，
+        //     于是抑制记错了对象，两边互相推 —— 表现是完全不同步）
+        if (!boundA) { boundA = true; bindScroll(scoreA, apiA, scoreB, apiB, 'A') }
+      },
+      error: function (e) { log('A error ' + (e && e.message || e), 'bad') },
+    })
+
+    regAll(apiB, {
+      scoreLoaded: function (sc) {
+        log('B scoreLoaded ✅ ' + (sc && sc.masterBars ? sc.masterBars.length : '?') + ' 小节 · ' +
+            ((sc && sc.tracks) || []).length + ' 个声部', 'ok')
+      },
+      soundFontLoaded: function () { log('B 音源就绪', 'ok') },
+      settingsUpdated: function () { log('B settingsUpdated（重排开始）') },
+      beatMouseDown: function (beat) {
+        if (beat && typeof beat.absoluteDisplayStart === 'number') {
+          seekBothTo(beat.absoluteDisplayStart, diff.head)
+        }
+      },
+      postRenderFinished: function () {
+        reportCursor(scoreB, '右·渲染后')
+        drawnB = drawDiff(apiB, diff, scoreB, 'head', 0)
+        log('右栏渲染完 · 标绿 ' + drawnB + ' 处 · 容器 ' +
+            scoreB.clientWidth + '×' + scoreB.clientHeight, drawnB ? 'ok' : 'warn')
+        if (!boundB) { boundB = true; bindScroll(scoreB, apiB, scoreA, apiA, 'B') }
+      },
+      playerPositionChanged: function () {
+        onPosition('B', apiB, scoreB)
+        if (posTicksB++ === 0) reportCursor(scoreB, '右·播放中')
+      },
+      error: function (e) { log('B error ' + (e && e.message || e), 'bad') },
+    })
+
+    log('对比模式就绪：' + diff.diffCount + ' 处差异', 'ok')
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  //  缩放
+  //
+  //  AlphaTab 的缩放是改 display.scale，然后 updateSettings() 让它生效，
+  //  再 render() 触发重排 —— 三个都要，少一个都不会重新排。
+  //
+  //  对比模式下两个实例要一起改，否则两边字号不一致，行结构也会错开。
+  // ═════════════════════════════════════════════════════════════════
+
+  var zoom = { apis: [], base: 1, mult: 1, box: null, val: null }
+
+  function applyZoom() {
+    if (!zoom.val) return
+    var s = zoom.base * zoom.mult
+    zoom.val.textContent = Math.round(zoom.mult * 100) + '%'
+    zoom.apis.forEach(function (api) {
+      if (!api || !api.settings || !api.settings.display) return
+      try {
+        api.settings.display.scale = s
+        api.updateSettings()
+        if (typeof api.render === 'function') api.render()
+      } catch (e) { log('改缩放失败：' + e.message, 'bad') }
+    })
+    log('缩放 ' + Math.round(zoom.mult * 100) + '%（scale=' + s.toFixed(3) + '）' +
+        '　应用到 ' + zoom.apis.length + ' 个实例')
+
+    // 标记的像素偏移跟着缩放走
+    zoomRatio = zoom.mult
+    // 重排是异步的：postRenderFinished 会重画一次，这里再补一次兜底
+    // （坐标可能比那个事件晚一拍才更新）
+    if (zoom.redraw) setTimeout(zoom.redraw, 250)
+  }
+
+  function setupZoom(apis) {
+    zoom.apis = apis.filter(Boolean)
+    if (!zoom.apis.length) return
+    // 基准 = 实例当前的 scale（来自 pieces.json 的 display 或页面默认值）
+    var a0 = zoom.apis[0]
+    zoom.base = (a0.settings && a0.settings.display && a0.settings.display.scale) || 1
+    zoom.mult = 1
+
+    if (!zoom.box) {
+      zoom.box = document.getElementById('zoom')
+      zoom.val = document.getElementById('zVal')
+      document.getElementById('zIn').onclick = function () {
+        zoom.mult = Math.min(3, zoom.mult * 1.15); applyZoom()
+      }
+      document.getElementById('zOut').onclick = function () {
+        zoom.mult = Math.max(0.3, zoom.mult / 1.15); applyZoom()
+      }
+      zoom.val.onclick = function () { zoom.mult = 1; applyZoom() }
+
+      // 自动滚动开关：scrollMode 1=跟光标滚，0=不滚
+      var sc = document.getElementById('zScroll')
+      function paintScroll() {
+        sc.className = AUTO_SCROLL ? '' : 'off'
+        sc.title = AUTO_SCROLL ? '播放时自动滚动：开（点一下关掉）'
+                               : '播放时自动滚动：关（点一下打开）'
+      }
+      sc.onclick = function () {
+        AUTO_SCROLL = !AUTO_SCROLL
+        paintScroll()
+        // 各模式自己决定怎么应用：
+        //   单曲/摞叠：所有实例一起改
+        //   左右并排：只给「在播的那一边」开，另一边始终关
+        //             （见 applyScrollMode 的注释）
+        // AlphaTab 的 scrollMode 恒为 0，所以这里只要改全局变量即可 ——
+        // 滚动由 scrollToCursor() 按 AUTO_SCROLL 决定做不做。
+        // （不再去动 AlphaTab 的设置，避免它的内部状态被"开过"之后关不干净）
+        if (zoom.onScrollToggle) zoom.onScrollToggle()
+        log('自动滚动：' + (AUTO_SCROLL ? '开' : '关'))
+      }
+      paintScroll()
+    }
+    zoom.box.style.display = ''
+    applyZoom()
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  //  单曲模式
+  // ═════════════════════════════════════════════════════════════════
+
+  function showPlayer(piece) {
+    el.title.textContent = piece.title || piece.id
+    el.sub.textContent = '乐谱播放'
+    el.back.style.display = ''
+    el.footer.style.display = ''
+    el.listen.style.display = 'none'
+    document.title = (piece.title || piece.id) + ' — OpenMuse'
+
+    el.main.innerHTML = ''
+    var score = document.createElement('div')
+    score.id = 'score'
+    el.main.appendChild(score)
+
+    var api = null
+    var wantPlay = false, totalMs = 0, dragging = false, posTicks = 0
+
+    el.play.onclick = function () {
+      if (!api) return
+      if (api.playerState === 1) { api.pause(); return }
+      wantPlay = true
+      try { log('play() 返回 ' + api.play()) } catch (e) { log('play 异常 ' + e.message, 'bad') }
+    }
+    el.stop.onclick = function () {
+      if (!api) return
+      api.stop(); el.play.textContent = '▶ 播放'; el.seek.value = '0'
+      el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
+    }
+    el.seek.oninput = function () { dragging = true }
+    el.seek.onchange = function () {
+      if (!api) return
+      var t = Number(el.seek.value)
+      dragging = false
+      // 不要 pause → 设位置 → play：play 是 postMessage 给 worker 的，
+      // 会从 pause 的位置续上，把设的位置吞掉。直接设就行。
+      try { api.timePosition = t } catch (e) {}
+      setTimeout(syncUi, 0)
+    }
+    document.addEventListener('keydown', function (ev) {
+      if (ev.code !== 'Space' || ev.target === el.seek) return
+      ev.preventDefault(); el.play.click()
+    })
 
     try {
       api = new alphaTab.AlphaTabApi(score, {
         core: {
           file: piece.file,
-          // ⚠️ 字体目录默认是「脚本所在目录/font/」，我们的在 vendor/ 下。
           fontDirectory: 'vendor/',
-
-          // ⚠️ tracks 必须显式设成 'all'。
-          //
-          // 默认值是 null —— AlphaTab 只渲染**第一个 track**。
-          // 单声部谱子（钢琴）看不出来，但多乐器谱子就只剩一行谱，
-          // 而声音是全都在响 —— 表现是「听到所有乐器，只看到一件乐器的谱」。
           tracks: 'all',
         },
-        display: displayFor(piece),
+        display: piece.display ? Object.assign({}, DISPLAY, piece.display) : DISPLAY,
         player: {
           enablePlayer: true,
-          // ⚠️ 必须 sf2。sf3 会被静默拒绝（见文件顶部规则 ①）。
+          playerMode: 1,      // 见 mkSettings 的注释：光标依赖它
           soundFont: 'vendor/sonivox.sf2',
           scrollElement: score,
-
-          // ── 播放光标 ──
-          // 这三项**默认就是 true**（前提是播放器启用），
-          // 这里显式写出来是为了不依赖默认值 —— 也方便一眼看出光标是开着的。
-          // 光标关掉的两大原因：播放器没启用、或者有人为了自绘光标把它设成 false。
-          enableCursor: true,             // 显示光标
-          enableAnimatedBeatCursor: true, // 拍光标平滑移动（false 则是逐拍跳）
-          enableElementHighlighting: true,// 高亮当前音符
+          outputMode: outputMode(false),
+          enableCursor: true,
+          enableAnimatedBeatCursor: true,
+          scrollMode: 0,   // 见上面注释：改用自己实现的 scrollToCursor
         },
       })
-      log('AlphaTabApi 创建成功', 'ok')
+      log('AlphaTabApi 创建成功（输出模式 ' + (outputMode(false) ? 'ScriptProcessor' : 'AudioWorklet') + '）', 'ok')
+      setupZoom([api])
+      zoom.onScrollToggle = null
+
+      // ── 滚动探针 ────────────────────────────────────────────────
+      // 「自动滚动关不掉」需要先弄清是谁在滚：是 AlphaTab（受 scrollMode
+      // 控制）、还是我的同步代码、还是浏览器。所以滚动位置一变就报一次，
+      // 同时报出 AlphaTab 当前认的 scrollMode。
+      if (DEBUG) {
+        var lastTop = -1, lastMode = null
+        setInterval(function () {
+          if (!api) return
+          var t = Math.round(score.scrollTop)
+          var m = (api.settings && api.settings.player) ? api.settings.player.scrollMode : '?'
+          if (t !== lastTop || m !== lastMode) {
+            log('滚动探查 scrollTop=' + t + '  scrollMode=' + m +
+                '  playerState=' + api.playerState +
+                '  autoScroll(AUTO_SCROLL)=' + AUTO_SCROLL, t !== lastTop ? 'warn' : undefined)
+            lastTop = t; lastMode = m
+          }
+        }, 400)
+      }
     } catch (e) {
       setHint('AlphaTab 初始化失败：' + e.message, true)
-      log('创建失败 ' + e.message, 'bad')
       return
     }
 
-    // ── 库事件：每个单独包，缺一个只跳过它（见文件顶部规则 ③）────
-    function reg(name, handler) {
-      var ev = api[name]
-      if (!ev || typeof ev.on !== 'function') {
-        log('✗ ' + name + ' 不存在，跳过', 'warn')
-        return
-      }
-      try { ev.on(handler); log('✓ ' + name) }
-      catch (e) { log('✗ ' + name + ' 注册失败：' + e.message, 'bad') }
-    }
-
-    var sfLast = -1
-    var syncUi = function () {
+    function syncUi() {
       if (!api) return
       var pos = api.timePosition || 0
       if (!dragging) el.seek.value = String(Math.round(pos))
       el.time.textContent = fmt(pos) + ' / ' + fmt(totalMs)
       el.play.textContent = api.playerState === 1 ? '⏸ 暂停' : '▶ 播放'
-      if (posTicks++ === 0) log('位置事件首次触发 playerState=' + api.playerState, 'ok')
+      scrollToCursor(api, score)
+      if (posTicks++ === 0) log('位置事件首次触发', 'ok')
     }
 
-    reg('scoreLoaded', function (score) {
-      var n = score && score.masterBars ? score.masterBars.length : '?'
-      var all = (score && score.tracks) || []
-      log('scoreLoaded ✅ ' + n + ' 小节 · 谱里共 ' + all.length + ' 个声部', 'ok')
-      if (DEBUG && all.length) {
-        log('  声部：' + all.map(function (t) { return t.name || ('#' + t.index) }).join('、'))
-      }
-      if (DEBUG) {
-        var d = displayFor(piece)
-        var over = piece.display ? '（本曲覆盖：' + JSON.stringify(piece.display) + '）' : ''
-        log('  排版：scale=' + d.scale + ' stretch=' + d.stretchForce +
-            ' justify=' + d.justifyLastSystem + ' bars/行=' + d.barsPerRow +
-            ' 行距=' + d.systemPaddingTop + ' 声部距=' + d.trackStaffPaddingBetween + ' ' + over)
-      }
-      el.status.textContent = '音源加载中…'
+    regAll(api, {
+      scoreLoaded: function (sc) {
+        var n = sc && sc.masterBars ? sc.masterBars.length : '?'
+        var all = (sc && sc.tracks) || []
+        log('scoreLoaded ✅ ' + n + ' 小节 · ' + all.length + ' 个声部', 'ok')
+        el.status.textContent = '音源加载中…'
+      },
+      soundFontLoaded: function () {
+        log('音源就绪', 'ok')
+        el.status.textContent = '就绪'
+        totalMs = api.endTime || 0
+        el.seek.max = String(Math.max(1, Math.round(totalMs)))
+        el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
+        if (wantPlay) { try { api.play() } catch (e) {} }
+      },
+      playerPositionChanged: syncUi,
+      playerFinished: function () { el.play.textContent = '▶ 播放'; el.seek.value = '0' },
+      error: function (e) { log('error ' + (e && e.message || e), 'bad') },
     })
-
-    reg('midiLoaded', function () { log('midiLoaded ✅', 'ok') })
-
-    // 检查光标 DOM 有没有被建出来。
-    // AlphaTab 往容器里插 .at-cursors / .at-cursor-bar / .at-cursor-beat，
-    // 它们是 empty div，靠内联样式定位 —— 所以"看不见光标"可能是
-    // 「元素没建出来」也可能是「建出来了但样式是透明的」，得分开看。
-    function reportCursor(tag) {
-      if (!DEBUG) return
-      var cursors = score.querySelector('.at-cursors')
-      var bar = score.querySelector('.at-cursor-bar')
-      var beat = score.querySelector('.at-cursor-beat')
-      log('光标[' + tag + '] .at-cursors=' + (cursors ? '有' : '无') +
-          '  .at-cursor-bar=' + (bar ? '有' : '无') +
-          '  .at-cursor-beat=' + (beat ? '有' : '无'))
-      if (bar) {
-        var c = getComputedStyle(bar)
-        log('  bar  bg=' + c.backgroundColor + '  display=' + c.display +
-            '  ' + Math.round(bar.getBoundingClientRect().width) + '×' +
-            Math.round(bar.getBoundingClientRect().height))
-      }
-      if (beat) {
-        var c2 = getComputedStyle(beat)
-        log('  beat bg=' + c2.backgroundColor + '  ' +
-            Math.round(beat.getBoundingClientRect().width) + '×' +
-            Math.round(beat.getBoundingClientRect().height))
-      }
-    }
-
-    reg('renderFinished', function () {
-      log('renderFinished ✅ 谱面画好了')
-      reportCursor('渲染后')
-    })
-
-    reg('soundFontLoad', function (e) {
-      var pct = e && e.total ? Math.round((e.loaded / e.total) * 100) : -1
-      if (pct !== sfLast) { sfLast = pct; log('soundFontLoad ' + pct + '%') }
-    })
-
-    reg('soundFontLoaded', function () {
-      log('soundFontLoaded ✅ 音源就绪', 'ok')
-      el.status.textContent = '就绪'
-      totalMs = api.endTime || 0
-      el.seek.max = String(Math.max(1, Math.round(totalMs)))
-      el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
-      if (wantPlay) {
-        // 用户点过播放但当时还没就绪 —— 补一次
-        try { api.play() } catch (e) { log('补播失败 ' + e.message, 'bad') }
-      }
-    })
-
-    reg('playerReady', function () { log('playerReady ✅', 'ok') })
-    reg('playerStateChanged', function () {
-      log('playerStateChanged → ' + api.playerState + '（0=暂停 1=播放）')
-      el.play.textContent = api.playerState === 1 ? '⏸ 暂停' : '▶ 播放'
-      if (api.playerState === 1) reportCursor('开始播放')
-    })
-
-    // ⚠️ 位置事件叫 playerPositionChanged（见文件顶部规则 ②）
-    reg('playerPositionChanged', syncUi)
-    reg('positionChanged', syncUi)          // 兜底：老版本可能叫这个
-    reg('playedBeatChanged', function () { if (posTicks === 0) syncUi() })
-
-    reg('playerFinished', function () {
-      log('playerFinished 播放结束')
-      el.play.textContent = '▶ 播放'
-      el.seek.value = '0'
-    })
-
-    reg('error', function (e) { log('error ' + (e && e.message || e), 'bad') })
-
-    log('事件注册完毕', 'ok')
   }
 
   // ═════════════════════════════════════════════════════════════════
-  //  3. 启动
+  //  启动
   // ═════════════════════════════════════════════════════════════════
 
   var wantedId = params.get('piece')
 
-  loadManifest()
-    .then(function (pieces) {
+  loadJson('pieces.json')
+    .then(function (j) {
+      var pieces = Array.isArray(j.pieces) ? j.pieces : []
       log('pieces.json 读到 ' + pieces.length + ' 首')
-      if (wantedId) {
-        var piece = pieces.filter(function (p) { return p.id === wantedId })[0]
-        if (!piece) {
-          showList(pieces)
-          setHint('找不到曲子「' + wantedId + '」', true)
-          return
-        }
-        showPlayer(piece)
+
+      if (!wantedId) {
+        el.main.innerHTML = ''
+        var wrap = document.createElement('div'); wrap.id = 'list'
+        var h = document.createElement('h2'); h.textContent = pieces.length + ' 首曲子'
+        wrap.appendChild(h)
+        pieces.forEach(function (it) {
+          var a = document.createElement('a')
+          a.className = 'card'
+          a.href = '?piece=' + encodeURIComponent(it.id) + (DEBUG ? '&debug' : '')
+          a.innerHTML = '<div class="t">' + esc(it.title || it.id) +
+                        (it.compareFile ? '<span class="badge">对照</span>' : '') + '</div>' +
+                        '<div class="m">' + esc(it.file) + '</div>'
+          wrap.appendChild(a)
+        })
+        el.main.appendChild(wrap)
+        el.status.textContent = ''
+        document.title = 'OpenMuse'
+        var zb = document.getElementById('zoom')
+        if (zb) zb.style.display = 'none'
+        return
+      }
+
+      var piece = pieces.filter(function (p) { return p.id === wantedId })[0]
+      if (!piece) {
+        setHint('找不到曲子「' + wantedId + '」', true)
+        return
+      }
+      log('载入：' + (piece.title || piece.id))
+
+      // 能对比 = 有差异清单 + 有对比版本的文件。
+      // ⚠️ 这里曾经写成别的条件（判断和"哪种对比模式"混在一起），
+      //    结果这一支永远进不来，页面直接退回普通播放页 ——
+      //    表现是「打开对照却看到普通的单曲播放页」。
+      //    现在只有一种对比模式（左右并排），条件就干净了。
+      var canCompare = !!piece.compare && !!piece.compareFile
+
+      if (canCompare) {
+        // 对比模式：先把面板挂上占位，再去读差异清单 ——
+        // 这样即使读失败也看得见原因，不会「什么都没出现」。
+        el.main.innerHTML = ''
+        var shell = document.createElement('div'); shell.id = 'cmp'
+        var sh = document.createElement('div'); sh.className = 'hd'
+        sh.textContent = '对比模式：正在读取差异清单…'
+        shell.appendChild(sh); el.main.appendChild(shell)
+
+        loadJson(piece.compare)
+          .then(function (diff) {
+            log('读到 ' + diff.diffCount + ' 处差异', diff.diffCount ? 'ok' : 'warn')
+            if (!diff.diffCount) { sh.textContent = '两个版本完全一致。'; return }
+            showCompare(piece, diff)
+          })
+          .catch(function (e) {
+            sh.textContent = '❌ 读差异清单失败：' + e.message
+            sh.style.color = '#ff6b6b'
+            log('读差异清单失败：' + e.message, 'bad')
+          })
       } else {
-        showList(pieces)
+        showPlayer(piece)
       }
     })
     .catch(function (e) {

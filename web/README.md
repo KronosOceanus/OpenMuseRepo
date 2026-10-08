@@ -59,14 +59,16 @@ python3 add-piece.py ~/Documents/MuseScore4/作曲/优纪.mscz youji "优纪"
 ## 目录
 
 ```
-index.html        页面本体（就这一个文件）
-serve.py          本地预览服务（带 no-cache）
-add-piece.py      加曲子（转换 + 修速度记号 + 更新清单）
-fix-tempo.py      把非四分音符的速度记号换算成等价的四分音符
-list-pieces.py    列出所有曲子的声部 / 音色 / 小节数
-pieces.json       曲目清单
-pieces/           MusicXML
-vendor/           AlphaTab / 音源 / 乐谱字体
+index.html          页面本体（就这一个文件）
+serve.py            本地预览服务（带 no-cache）
+add-piece.py        加曲子（转换 + 修速度记号 + 更新清单）
+fix-tempo.py        把非四分音符的速度记号换算成等价的四分音符
+list-pieces.py      列出所有曲子的声部 / 音色 / 小节数
+diff-musicxml.py    比两个 MusicXML → 差异清单（对比模式用）
+merge-musicxml.py   把两份 MusicXML 拼成一份（不经过 MuseScore）
+pieces.json         曲目清单
+pieces/             MusicXML
+vendor/             AlphaTab / 音源 / 乐谱字体
 ```
 
 ## 依赖
@@ -78,6 +80,63 @@ vendor/           AlphaTab / 音源 / 乐谱字体
 | `vendor/Bravura.woff2` | 同上的 `dist/font/Bravura.woff2` | |
 
 升级 AlphaTab 时三个一起换，路径都是按包的实际结构来的。
+
+---
+
+## 对比模式
+
+同一首曲子有两个版本（不同人扒的、或者你自己改的），左右并排看差异。
+**改动处标红（原版）／标绿（改后）**，像 GitHub 的 diff，只是长在乐谱上。
+
+### 怎么生成
+
+```bash
+# ① 造一份「改后」版本（演示用；真实场景里这就是别人发来的谱）
+python3 make-demo-changes.py pieces/曲子.musicxml pieces/曲子-mod.musicxml 8
+
+# ② 出差异清单
+python3 diff-musicxml.py pieces/曲子.musicxml pieces/曲子-mod.musicxml \
+        -o pieces/曲子.diff.json
+
+# ③ pieces.json 里加两个字段
+#   "compareFile": "pieces/曲子-mod.musicxml",
+#   "compare":     "pieces/曲子.diff.json"
+```
+
+打开 `?piece=<id>` 就是左右并排。
+
+### 页面上的行为
+
+```
+左栏 = file（原版）       右栏 = compareFile（改后）
+改动处标红                对应处标绿
+
+听：[🔊 原版] [· 改后]    ← 单选。同一时刻只有一个在响（见下）
+点任意一栏的谱面           → 两边一起跳到那个位置
+右下角 −  100%  +         → 缩放（两边联动）
+右下角 ⇅                  → 自动滚动的开关
+差异列表（默认折叠）        → 点一条跳到那一段；播放时那一行会高亮
+```
+
+### 为什么是「左右分栏」而不是「摞成一份谱」
+
+摞叠要先把两个版本合成一份文件。**声部一多那份文件就出问题** ——
+实测 11 个声部的曲子合并后 22 个 part，**MuseScore 直接段错误**
+（退出码 139），转不出 MusicXML。
+
+左右分栏只需要各自的 MusicXML，压根不用合并，而且**结构不同的两个版本
+也能比**（小节数不一样也行，比到公共部分为止）。
+
+> `merge-musicxml.py` 仍然留着（在 MusicXML 层拼接，不经过 MuseScore，
+> 所以不会段错误）。想要摞叠视图的话它能用，只是页面上没做这个模式。
+
+### 为什么「听」是单选，不能两个一起听
+
+两个版本各是一个 AlphaTab 实例，**各有自己的音频时钟和缓冲**。
+`apiA.play()` 和 `apiB.play()` 不是原子操作，中间差的那几毫秒消不掉 ——
+同时播出来就是「乱七八糟」。而且就算对得齐，两个版本重叠着听也分不清谁是谁。
+
+所以同一时刻只让一个响，切换时从**同一个 tick** 续上，A/B 对照是干净的。
 
 ---
 
@@ -282,6 +341,44 @@ flex 子项的默认 `min-height` 是 `auto`，意味着**它不会小于内容�
 一次只处理一个请求。浏览器会并发发好几个（HTML、JS、字体、音源），串行处理时后面的要排队。用 `http.server.ThreadingHTTPServer`。
 
 （注意：`ThreadingHTTPServer` 在 `http.server` 里，**不在 `socketserver` 里**。）
+
+**⑪ AlphaTab 不提供光标样式，得页面自己写**
+
+`.at-cursors` / `.at-cursor-bar` / `.at-cursor-beat` 是几个**空 div**，
+库不注入任何 CSS。不写样式就是透明的空盒子 —— 元素在、坐标也对，
+**但完全看不见**。重写页面时漏掉这段，表现就是「没有光标」。
+
+**⑫ `playerMode` 才是播放器的总开关（不是 `enablePlayer`）**
+
+`playerMode` 默认 `Disabled`，而光标要不要建看的是
+`playerMode !== Disabled && enableCursor`（见 min.js 的 `get _y()`）。
+
+**⑬ `scrollMode` 一旦开过就关不干净**
+
+实测：开一次自动滚动 → 再关 → 点任何按钮都往下滚，而且不是滚到光标。
+改 `scrollMode` 或调 `stopScrolling` 都压不住。
+**解法是不用它** —— `scrollMode` 恒为 0，自动滚动自己实现
+（见 `scrollToCursor()`）。
+
+**⑭ 两个实例是镜像的，处理器必须对称**
+
+左右并排有两个 AlphaTab 实例，事件处理器是分别手写的。
+**任何只写一边的逻辑都会漏** —— 实测「A 有自动滚动、B 没有」，
+表现是「选原版会滚，选改后不滚」。
+写完用工具对比两个 `regAll` 块。
+
+**⑮ `tickPosition` 和 `play()` 都是 postMessage，别套在一起用**
+
+```js
+// ✗ 播放中这么写，play 会从 pause 的位置续上，把设的位置吞掉
+if (was) pause(); tickPosition = t; if (was) play();
+
+// ✓ 直接设就行
+tickPosition = t;
+```
+
+表现是「播放中拖进度条卡一下但不动，继续从原处播」；
+暂停时反而正常（因为没有 play 来覆盖）。
 
 ---
 
