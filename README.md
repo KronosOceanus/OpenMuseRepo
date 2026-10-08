@@ -223,6 +223,14 @@ scripts/
 .github/workflows/
   score-preview.yml    PR 时自动生成对照
 .gitattributes         *.mscx text ← 这一行是关键
+
+web/                   网页播放器（见 web/README.md）
+  index.html           页面本体，零框架零构建
+  serve.py             本地预览服务（no-cache + 多线程）
+  add-piece.py         加曲子：转 MusicXML + 修速度记号 + 按声部数配排版
+  fix-tempo.py         把非四分音符的速度记号换算成等价的四分音符
+  list-pieces.py       列出所有曲子的声部 / 音色 / 小节数
+  vendor/              AlphaTab 1.8.4 + 音源 + 乐谱字体（不走 CDN）
 ```
 
 ---

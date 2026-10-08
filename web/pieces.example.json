@@ -1,0 +1,24 @@
+{
+  "_说明": [
+    "曲目清单的模板。把本文件复制成 pieces.json 再改。",
+    "pieces.json 被 .gitignore 忽略了 —— 因为里面是你的曲库。",
+    "",
+    "加曲子别手写这个文件，用：",
+    "    python3 add-piece.py <乐谱文件> <id> [标题]",
+    "它会转换、修速度记号、按声部数配好排版，然后更新 pieces.json。",
+    "",
+    "display 字段是按声部数自动算的（1-2 声部 scale 1.0，3-4 声部 0.9，……",
+    "10 声部以上不写，用页面的默认值）。想微调就改这里，" ,
+    "或者临时用 URL 参数试（见 README「排版」一节）。",
+    "",
+    "id 必须 ASCII（会进 URL），title 可以中文。"
+  ],
+  "pieces": [
+    {
+      "id": "example",
+      "title": "示例曲目（换成你自己的）",
+      "file": "pieces/example.musicxml",
+      "display": { "scale": 1.0, "systemPaddingTop": 24, "systemPaddingBottom": 24 }
+    }
+  ]
+}

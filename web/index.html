@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenMuse</title>
+
+<!--
+  乐谱播放页
+
+  ── 三条硬规则（都是踩出来的，改之前先读 README）────────────────
+
+  ① 音源必须 .sf2。.sf3 会被 AlphaTab 静默拒绝 —— 一个事件都不触发。
+  ② 位置事件叫 playerPositionChanged，不叫 positionChanged。
+     后者在 API 上是 undefined，.on() 抛异常会中断后面所有代码
+     （包括按钮绑定），表现是「点了毫无反应」。
+  ③ UI 的 addEventListener 必须排在所有库事件之前，且每个库事件
+     注册都要单独 try/catch —— 否则一个不存在的事件就能拖垮整页。
+
+  依赖全部在 vendor/ 下，不走 CDN。
+  加了 ?debug 会显示诊断面板。详见 README.md。
+-->
+
+<style>
+  :root {
+    --bg: #16161a; --panel: #1e1e24; --line: #2c2c34;
+    --text: #e6e6ea; --dim: #8a8a96; --accent: #4a9eff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    flex: none; padding: 10px 16px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  header .right { margin-left: auto; display: flex; align-items: baseline; gap: 12px; }
+  header a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  header a:hover { text-decoration: underline; }
+  #status { color: var(--dim); font-size: 12px; }
+
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+  /* ⚠️ min-height: 0 不能省 —— flex 子项默认 min-height:auto，
+     内容一长就撑开、把下面的控制条挤出屏幕。 */
+  #score { flex: 1; min-height: 0; overflow: auto; background: #fff; padding: 8px 0; }
+
+  #hint { padding: 40px 20px; text-align: center; color: var(--dim); white-space: pre-wrap; }
+  #hint.error { color: #ff6b6b; }
+
+  /* 曲目列表 */
+  #list { padding: 24px; overflow: auto; }
+  #list h2 { font-size: 13px; color: var(--dim); font-weight: 500; margin: 0 0 12px; }
+  .card {
+    display: block; padding: 14px 18px; margin-bottom: 10px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; color: var(--text); text-decoration: none;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card .t { font-size: 15px; font-weight: 600; }
+  .card .m { color: var(--dim); font-size: 12px; margin-top: 2px; }
+
+  footer {
+    flex: none; padding: 10px 16px; border-top: 1px solid var(--line);
+    background: var(--panel); display: flex; align-items: center; gap: 12px;
+  }
+  button {
+    background: var(--line); color: var(--text); border: 0; border-radius: 6px;
+    padding: 7px 14px; font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: #383842; }
+  button.primary { background: var(--accent); color: #fff; }
+  button.primary:hover { background: #3d8ae6; }
+  #seek { flex: 1; accent-color: var(--accent); }
+  #time { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 92px; text-align: right; }
+
+  /* 诊断面板：只有 ?debug 时才创建 */
+  #debug {
+    flex: none; max-height: 26vh; overflow: auto; padding: 8px 16px;
+    background: #101014; border-top: 1px solid var(--line);
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #9a9aa6; white-space: pre-wrap;
+  }
+  #debug .ok   { color: #4ade80; }
+  #debug .bad  { color: #ff6b6b; }
+  #debug .warn { color: #fbbf24; }
+
+  /* ── 播放光标 ────────────────────────────────────────────────────
+     AlphaTab 往容器里插 .at-cursors（absolute; z-index:1000），
+     里面是 .at-cursor-bar（当前小节的色块）和 .at-cursor-beat（当前拍的位置线）。
+     它给的默认样式比较淡，而且颜色写在内联样式上 ——
+     想改必须用 !important 才盖得住。 */
+  .at-cursor-bar {
+    background: rgba(74, 158, 255, .22) !important;
+  }
+  .at-cursor-beat {
+    background: #4a9eff !important;
+    width: 3px !important;
+    box-shadow: 0 0 4px rgba(74, 158, 255, .8);
+  }
+  /* 正在播放的音符高亮 */
+  .at-highlight * {
+    fill: #1f6fd0 !important;
+    stroke: #1f6fd0 !important;
+  }
+</style>
+</head>
+
+<body>
+
+<header>
+  <h1 id="title">OpenMuse</h1>
+  <span class="sub" id="sub">乐谱播放</span>
+  <span class="right">
+    <a id="back" href="./" style="display:none">← 曲目列表</a>
+    <span id="status"></span>
+  </span>
+</header>
+
+<main id="main"></main>
+
+<footer id="footer" style="display:none">
+  <button id="btnPlay" class="primary">▶ 播放</button>
+  <button id="btnStop">■ 停止</button>
+  <input id="seek" type="range" min="0" max="1000" value="0">
+  <span id="time">0:00 / 0:00</span>
+</footer>
+
+<script src="vendor/alphaTab.min.js"></script>
+<script>
+(function () {
+  'use strict'
+
+  var BUILD = 'build-16'
+  var params = new URLSearchParams(location.search)
+  var DEBUG = params.has('debug')
+
+  var el = {
+    main:   document.getElementById('main'),
+    title:  document.getElementById('title'),
+    sub:    document.getElementById('sub'),
+    back:   document.getElementById('back'),
+    status: document.getElementById('status'),
+    footer: document.getElementById('footer'),
+    play: null, stop: null, seek: null, time: null,
+    debug: null,
+  }
+
+  // ── 日志 ────────────────────────────────────────────────────────
+  // 只有 ?debug 时才建面板并输出 —— 正常使用时页面上不出现调试信息。
+  var t0 = Date.now()
+  if (DEBUG) {
+    el.debug = document.createElement('div')
+    el.debug.id = 'debug'
+    document.body.appendChild(el.debug)
+  }
+  function log(msg, cls) {
+    if (!el.debug) return
+    var d = document.createElement('div')
+    if (cls) d.className = cls
+    d.textContent = ((Date.now() - t0) / 1000).toFixed(2) + 's  ' + msg
+    el.debug.appendChild(d)
+    el.debug.scrollTop = el.debug.scrollHeight
+    console.log('[openmuse]', msg)
+  }
+
+  function fmt(ms) {
+    if (!isFinite(ms) || ms < 0) ms = 0
+    var s = Math.floor(ms / 1000)
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+  }
+
+  function setHint(text, isError) {
+    el.main.innerHTML = ''
+    if (!text) return
+    var d = document.createElement('div')
+    d.id = 'hint'
+    if (isError) d.className = 'error'
+    d.textContent = text
+    el.main.appendChild(d)
+  }
+
+  log('=== ' + BUILD + ' ===  ' + location.href)
+
+  // ═════════════════════════════════════════════════════════════════
+  //  1. 曲目列表
+  // ═════════════════════════════════════════════════════════════════
+
+  function loadManifest() {
+    return fetch('pieces.json', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status)
+        return r.json()
+      })
+      .then(function (j) { return Array.isArray(j.pieces) ? j.pieces : [] })
+  }
+
+  function showList(pieces) {
+    el.main.innerHTML = ''
+    var wrap = document.createElement('div')
+    wrap.id = 'list'
+
+    var h = document.createElement('h2')
+    h.textContent = pieces.length + ' 首曲子'
+    wrap.appendChild(h)
+
+    if (pieces.length === 0) {
+      var p = document.createElement('div')
+      p.style.color = '#8a8a96'
+      p.textContent = 'pieces.json 里还没有曲子。加一首见 README。'
+      wrap.appendChild(p)
+    }
+
+    pieces.forEach(function (it) {
+      var a = document.createElement('a')
+      a.className = 'card'
+      a.href = '?piece=' + encodeURIComponent(it.id) + (DEBUG ? '&debug' : '')
+      var t = document.createElement('div'); t.className = 't'; t.textContent = it.title || it.id
+      var m = document.createElement('div'); m.className = 'm'; m.textContent = it.file
+      a.appendChild(t); a.appendChild(m)
+      wrap.appendChild(a)
+    })
+
+    el.main.appendChild(wrap)
+    el.status.textContent = ''
+    document.title = 'OpenMuse'
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  //  排版参数
+  //
+  //  AlphaTab 的默认排版偏「挤」，跟 MuseScore 差得比较明显。这几项
+  //  是最影响观感的，都能用 URL 参数当场调 —— 调好了再改这里的默认值。
+  //
+  //    参数        默认    作用
+  //    scale       0.5     整体缩放（字/音符大小）
+  //    stretch     1       小节拉伸力度。越小越挤在左边、越大越铺满整行
+  //                        ← 「小节长度乱」主要就是它
+  //    justify     1       最后一行也两端对齐（默认只对齐满行）
+  //                        ← 「换行不清楚」有一部分是它
+  //    bars        -1      每行固定几个小节，-1 = 自动。设了换行就可预测
+  //    syspad      60      行与行之间的间距（AlphaTab 默认 10）
+  //    staffpad    24      不同声部之间的间距（AlphaTab 默认 5，多乐器谱子偏挤）
+  //    padx/pady   24/20   页面边距（默认 35/35）
+  //
+  //  例：?piece=kyoutsuu&stretch=3&syspad=22&staffpad=18&debug
+  // ═════════════════════════════════════════════════════════════════
+
+  function numParam(name, dflt) {
+    var v = params.get(name)
+    if (v === null || v === '') return dflt
+    var n = Number(v)
+    return isNaN(n) ? dflt : n
+  }
+  function boolParam(name, dflt) {
+    var v = params.get(name)
+    if (v === null) return dflt
+    return v === '1' || v === 'true' || v === 'yes'
+  }
+
+  //  默认值来自实调（不是猜的）：
+  //    stretch=1  syspad=60  scale=0.5  staffpad=24
+  //  观感是「谱面小巧、行与行之间疏朗」，11 声部的总谱也看得清。
+  //  想微调还是用 URL 参数，不用改这里。
+  var DISPLAY = {
+    layoutMode: 0,                                   // 0 = Page（上下连续页面式）
+    scale: numParam('scale', 0.5),
+    stretchForce: numParam('stretch', 1),
+    justifyLastSystem: boolParam('justify', true),
+    barsPerRow: numParam('bars', -1),
+    systemPaddingTop: numParam('syspad', 60),
+    systemPaddingBottom: numParam('syspad', 60),
+    lastSystemPaddingBottom: numParam('lastpad', 24),
+    trackStaffPaddingBetween: numParam('staffpad', 24),
+    padding: [numParam('padx', 24), numParam('pady', 20)],
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  //  2. 播放器
+  // ═════════════════════════════════════════════════════════════════
+
+  /** 把 piece.display 里的键翻成 AlphaTab 的设置名，合并到默认值上。 */
+  function displayFor(piece) {
+    var d = {}
+    Object.keys(DISPLAY).forEach(function (k) { d[k] = DISPLAY[k] })
+    var ov = (piece && piece.display) || {}
+    if (ov.scale != null) d.scale = ov.scale
+    if (ov.stretchForce != null) d.stretchForce = ov.stretchForce
+    if (ov.justifyLastSystem != null) d.justifyLastSystem = ov.justifyLastSystem
+    if (ov.barsPerRow != null) d.barsPerRow = ov.barsPerRow
+    if (ov.systemPaddingTop != null) d.systemPaddingTop = ov.systemPaddingTop
+    if (ov.systemPaddingBottom != null) d.systemPaddingBottom = ov.systemPaddingBottom
+    if (ov.trackStaffPaddingBetween != null) d.trackStaffPaddingBetween = ov.trackStaffPaddingBetween
+    if (ov.padding != null) d.padding = ov.padding
+    return d
+  }
+
+  function showPlayer(piece) {
+    el.title.textContent = piece.title || piece.id
+    el.sub.textContent = '乐谱播放'
+    el.back.style.display = ''
+    el.footer.style.display = ''
+    document.title = (piece.title || piece.id) + ' — OpenMuse'
+
+    // 建出播放器需要的 DOM
+    el.main.innerHTML = ''
+    var score = document.createElement('div')
+    score.id = 'score'
+    el.main.appendChild(score)
+
+    el.play = document.getElementById('btnPlay')
+    el.stop = document.getElementById('btnStop')
+    el.seek = document.getElementById('seek')
+    el.time = document.getElementById('time')
+
+    // ── ⚠️ UI 注册必须排在所有库事件之前（见文件顶部规则 ③）──────
+    var api = null
+    var wantPlay = false
+    var totalMs = 0
+    var dragging = false
+    var posTicks = 0
+
+    document.addEventListener('click', function (ev) {
+      log('点击 <' + (ev.target.tagName || '?').toLowerCase() +
+          (ev.target.id ? ' id=' + ev.target.id : '') + '>')
+    }, true)
+
+    el.play.addEventListener('click', function () {
+      log('播放按钮被点击')
+      if (!api) return
+      if (api.playerState === 1) { api.pause(); return }
+      wantPlay = true
+      try {
+        var ok = api.play()
+        log('play() 返回 ' + ok, ok ? 'ok' : 'warn')
+      } catch (e) {
+        log('play() 抛异常 ' + e.message, 'bad')
+      }
+    })
+
+    el.stop.addEventListener('click', function () {
+      if (!api) return
+      api.stop()
+      el.play.textContent = '▶ 播放'
+      el.seek.value = '0'
+      el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
+    })
+
+    el.seek.addEventListener('input', function () { dragging = true })
+    el.seek.addEventListener('change', function () {
+      if (api) api.timePosition = Number(el.seek.value)
+      dragging = false
+    })
+
+    document.addEventListener('keydown', function (ev) {
+      if (ev.code !== 'Space' || ev.target === el.seek) return
+      ev.preventDefault()
+      el.play.click()
+    })
+
+    log('UI 控件已注册', 'ok')
+
+    if (typeof alphaTab === 'undefined') {
+      setHint('vendor/alphaTab.min.js 没加载上 —— 确认用 http:// 打开（不是 file://）。', true)
+      log('alphaTab 未定义', 'bad')
+      return
+    }
+
+    try {
+      api = new alphaTab.AlphaTabApi(score, {
+        core: {
+          file: piece.file,
+          // ⚠️ 字体目录默认是「脚本所在目录/font/」，我们的在 vendor/ 下。
+          fontDirectory: 'vendor/',
+
+          // ⚠️ tracks 必须显式设成 'all'。
+          //
+          // 默认值是 null —— AlphaTab 只渲染**第一个 track**。
+          // 单声部谱子（钢琴）看不出来，但多乐器谱子就只剩一行谱，
+          // 而声音是全都在响 —— 表现是「听到所有乐器，只看到一件乐器的谱」。
+          tracks: 'all',
+        },
+        display: displayFor(piece),
+        player: {
+          enablePlayer: true,
+          // ⚠️ 必须 sf2。sf3 会被静默拒绝（见文件顶部规则 ①）。
+          soundFont: 'vendor/sonivox.sf2',
+          scrollElement: score,
+
+          // ── 播放光标 ──
+          // 这三项**默认就是 true**（前提是播放器启用），
+          // 这里显式写出来是为了不依赖默认值 —— 也方便一眼看出光标是开着的。
+          // 光标关掉的两大原因：播放器没启用、或者有人为了自绘光标把它设成 false。
+          enableCursor: true,             // 显示光标
+          enableAnimatedBeatCursor: true, // 拍光标平滑移动（false 则是逐拍跳）
+          enableElementHighlighting: true,// 高亮当前音符
+        },
+      })
+      log('AlphaTabApi 创建成功', 'ok')
+    } catch (e) {
+      setHint('AlphaTab 初始化失败：' + e.message, true)
+      log('创建失败 ' + e.message, 'bad')
+      return
+    }
+
+    // ── 库事件：每个单独包，缺一个只跳过它（见文件顶部规则 ③）────
+    function reg(name, handler) {
+      var ev = api[name]
+      if (!ev || typeof ev.on !== 'function') {
+        log('✗ ' + name + ' 不存在，跳过', 'warn')
+        return
+      }
+      try { ev.on(handler); log('✓ ' + name) }
+      catch (e) { log('✗ ' + name + ' 注册失败：' + e.message, 'bad') }
+    }
+
+    var sfLast = -1
+    var syncUi = function () {
+      if (!api) return
+      var pos = api.timePosition || 0
+      if (!dragging) el.seek.value = String(Math.round(pos))
+      el.time.textContent = fmt(pos) + ' / ' + fmt(totalMs)
+      el.play.textContent = api.playerState === 1 ? '⏸ 暂停' : '▶ 播放'
+      if (posTicks++ === 0) log('位置事件首次触发 playerState=' + api.playerState, 'ok')
+    }
+
+    reg('scoreLoaded', function (score) {
+      var n = score && score.masterBars ? score.masterBars.length : '?'
+      var all = (score && score.tracks) || []
+      log('scoreLoaded ✅ ' + n + ' 小节 · 谱里共 ' + all.length + ' 个声部', 'ok')
+      if (DEBUG && all.length) {
+        log('  声部：' + all.map(function (t) { return t.name || ('#' + t.index) }).join('、'))
+      }
+      if (DEBUG) {
+        var d = displayFor(piece)
+        var over = piece.display ? '（本曲覆盖：' + JSON.stringify(piece.display) + '）' : ''
+        log('  排版：scale=' + d.scale + ' stretch=' + d.stretchForce +
+            ' justify=' + d.justifyLastSystem + ' bars/行=' + d.barsPerRow +
+            ' 行距=' + d.systemPaddingTop + ' 声部距=' + d.trackStaffPaddingBetween + ' ' + over)
+      }
+      el.status.textContent = '音源加载中…'
+    })
+
+    reg('midiLoaded', function () { log('midiLoaded ✅', 'ok') })
+
+    // 检查光标 DOM 有没有被建出来。
+    // AlphaTab 往容器里插 .at-cursors / .at-cursor-bar / .at-cursor-beat，
+    // 它们是 empty div，靠内联样式定位 —— 所以"看不见光标"可能是
+    // 「元素没建出来」也可能是「建出来了但样式是透明的」，得分开看。
+    function reportCursor(tag) {
+      if (!DEBUG) return
+      var cursors = score.querySelector('.at-cursors')
+      var bar = score.querySelector('.at-cursor-bar')
+      var beat = score.querySelector('.at-cursor-beat')
+      log('光标[' + tag + '] .at-cursors=' + (cursors ? '有' : '无') +
+          '  .at-cursor-bar=' + (bar ? '有' : '无') +
+          '  .at-cursor-beat=' + (beat ? '有' : '无'))
+      if (bar) {
+        var c = getComputedStyle(bar)
+        log('  bar  bg=' + c.backgroundColor + '  display=' + c.display +
+            '  ' + Math.round(bar.getBoundingClientRect().width) + '×' +
+            Math.round(bar.getBoundingClientRect().height))
+      }
+      if (beat) {
+        var c2 = getComputedStyle(beat)
+        log('  beat bg=' + c2.backgroundColor + '  ' +
+            Math.round(beat.getBoundingClientRect().width) + '×' +
+            Math.round(beat.getBoundingClientRect().height))
+      }
+    }
+
+    reg('renderFinished', function () {
+      log('renderFinished ✅ 谱面画好了')
+      reportCursor('渲染后')
+    })
+
+    reg('soundFontLoad', function (e) {
+      var pct = e && e.total ? Math.round((e.loaded / e.total) * 100) : -1
+      if (pct !== sfLast) { sfLast = pct; log('soundFontLoad ' + pct + '%') }
+    })
+
+    reg('soundFontLoaded', function () {
+      log('soundFontLoaded ✅ 音源就绪', 'ok')
+      el.status.textContent = '就绪'
+      totalMs = api.endTime || 0
+      el.seek.max = String(Math.max(1, Math.round(totalMs)))
+      el.time.textContent = fmt(0) + ' / ' + fmt(totalMs)
+      if (wantPlay) {
+        // 用户点过播放但当时还没就绪 —— 补一次
+        try { api.play() } catch (e) { log('补播失败 ' + e.message, 'bad') }
+      }
+    })
+
+    reg('playerReady', function () { log('playerReady ✅', 'ok') })
+    reg('playerStateChanged', function () {
+      log('playerStateChanged → ' + api.playerState + '（0=暂停 1=播放）')
+      el.play.textContent = api.playerState === 1 ? '⏸ 暂停' : '▶ 播放'
+      if (api.playerState === 1) reportCursor('开始播放')
+    })
+
+    // ⚠️ 位置事件叫 playerPositionChanged（见文件顶部规则 ②）
+    reg('playerPositionChanged', syncUi)
+    reg('positionChanged', syncUi)          // 兜底：老版本可能叫这个
+    reg('playedBeatChanged', function () { if (posTicks === 0) syncUi() })
+
+    reg('playerFinished', function () {
+      log('playerFinished 播放结束')
+      el.play.textContent = '▶ 播放'
+      el.seek.value = '0'
+    })
+
+    reg('error', function (e) { log('error ' + (e && e.message || e), 'bad') })
+
+    log('事件注册完毕', 'ok')
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  //  3. 启动
+  // ═════════════════════════════════════════════════════════════════
+
+  var wantedId = params.get('piece')
+
+  loadManifest()
+    .then(function (pieces) {
+      log('pieces.json 读到 ' + pieces.length + ' 首')
+      if (wantedId) {
+        var piece = pieces.filter(function (p) { return p.id === wantedId })[0]
+        if (!piece) {
+          showList(pieces)
+          setHint('找不到曲子「' + wantedId + '」', true)
+          return
+        }
+        showPlayer(piece)
+      } else {
+        showList(pieces)
+      }
+    })
+    .catch(function (e) {
+      log('读 pieces.json 失败：' + e.message, 'bad')
+      el.status.textContent = '出错'
+      setHint('读 pieces.json 失败：' + e.message +
+              '\n\n确认用 python3 serve.py 起服务（不是直接双击文件）。', true)
+    })
+})()
+</script>
+
+</body>
+</html>
