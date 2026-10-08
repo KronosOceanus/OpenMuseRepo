@@ -193,6 +193,17 @@ def main():
     print(f'     只比了公共的 {d["measureCount"]} 小节，{d["diffCount"]} 处差异'
           + ('  ⚠️ 两边小节数不同' if d['truncated'] else ''))
 
+    # 整声部空缺 —— 必须单独报，不然「0 处差异」会被读成「两版一样」。
+    # 实测：把 Dreamy 的钟琴整曲留空，音符差异是 0（因为不比了），
+    # 但真正的事实是「有人漏扒了钟琴」。
+    if d.get('missingParts'):
+        print()
+        print('     整声部空缺（一侧整曲无内容，可能没扒）：')
+        for m in d['missingParts']:
+            have = m['notesB'] if m['emptySide'] == 'A' else m['notesA']
+            print(f'       {m["name"]}：{m["emptySide"]} 侧整曲无内容，'
+                  f'另一侧 {have} 个音　⟹ 不逐音符比较')
+
     # ③b 记号差异（力度/速度/文字/连音线…）
     # 单独一个脚本、单独一个 JSON —— 这样记号那块出问题不会影响音符对比。
     # ⚠️ 记号改动**完全不碰音符**：实测注入 7 处记号改动后，音符序列

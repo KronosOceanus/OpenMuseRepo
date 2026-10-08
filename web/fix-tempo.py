@@ -51,10 +51,23 @@ FACTOR = {
 }
 
 METRONOME_RE = re.compile(r'<metronome\b[^>]*>([\s\S]*?)</metronome>')
+# 按 <direction> 整块处理 —— 这样能拿到同一块里的 <sound tempo>
+DIRECTION_RE = re.compile(r'<direction\b[^>]*>[\s\S]*?</direction>')
 
 
-def fix_metronome_inner(inner):
-    """把一个 <metronome> 的内容改成四分音符版本。返回 (新内容, 说明) 或 (None, None)。"""
+def fix_metronome_inner(inner, sound_tempo=None):
+    """把一个 <metronome> 的内容改成四分音符版本。返回 (新内容, 说明) 或 (None, None)。
+
+    ⚠️ 优先用同一 <direction> 里的 <sound tempo>，而不是自己按 beat-unit 算。
+
+        <sound tempo> 是 **MuseScore 自己播放时用的值**（它内部一律存四分音符 BPM，
+        .mscx 里的 <tempo> × 60 就是它）。自己算只在没有 sound 时兜底。
+
+        实测贝多芬第五：谱面标 half· = 108、<sound tempo=194>。
+        自己算 → 108 × 3 = 324，和 MuseScore 的 194 **差得很多**
+        （那份谱的显示标记和内部速度本身就矛盾，我不确定哪个对；
+         但页面要和 MuseScore 播放一致，就该用 194）。
+    """
     m_unit = re.search(r'<beat-unit>([^<]+)</beat-unit>', inner)
     m_per = re.search(r'<per-minute>([^<]+)</per-minute>', inner)
     if not m_unit or not m_per:
@@ -66,7 +79,9 @@ def fix_metronome_inner(inner):
     except ValueError:
         return None, None
 
-    if unit == 'quarter' and '<beat-unit-dot' not in inner:
+    dotted = '<beat-unit-dot' in inner
+
+    if unit == 'quarter' and not dotted and sound_tempo is None:
         return None, None  # 本来就是四分音符，不用动
 
     factor = FACTOR.get(unit)
@@ -75,11 +90,15 @@ def fix_metronome_inner(inner):
     if factor is None:
         return None, f'认不出的 beat-unit「{unit}」—— 跳过'
 
-    dotted = '<beat-unit-dot' in inner
     if dotted:
         factor *= 1.5
 
-    new_per = per * factor
+    if sound_tempo is not None:
+        new_per = float(sound_tempo)          # ← MuseScore 的权威值
+        src_note = f'MuseScore 的 sound tempo={sound_tempo}'
+    else:
+        new_per = per * factor                # ← 没有 sound 时自己算
+        src_note = f'自己算（{unit}{"·" if dotted else ""} × {factor:g}）'
 
     # 整数就别显示小数点
     txt = str(int(round(new_per))) if abs(new_per - round(new_per)) < 1e-9 else f'{new_per:g}'
@@ -91,7 +110,65 @@ def fix_metronome_inner(inner):
     out = re.sub(r'<beat-unit-dot\s*/>', '', out)
 
     sign = f'{unit}{"·" if dotted else ""} = {m_per.group(1)}'
-    return out, f'{sign}  →  四分音符 = {txt}'
+    return out, f'{sign}  →  四分音符 = {txt}　（{src_note}）'
+
+
+def ensure_metronomes(src):
+    """给每一处 <sound tempo> 补一个 <metronome> 记号。
+
+    【为什么必须要这一步】
+
+    AlphaTab 只读 <metronome>（谱面记号），**忽略 <sound tempo>**。
+    谱子里如果只有个别地方有记号，整曲就会按那个速度播到底。
+
+    实测贝多芬第五：MusicXML 里有 **36 处** <sound tempo>，
+    但只有第 1 小节有 <metronome>。于是页面把整曲都当成 194 BPM ——
+    而那段慢板实际是 25~50 BPM，**被播快了 4~8 倍**。
+    （MuseScore 自己渲染 7 分 54 秒，页面按 194 播只要 5 分 10 秒。）
+
+    ⚠️ <sound tempo> 有两种放法，都要管：
+
+        ① 包在 <direction> 里（5 处 —— 这种通常带谱面记号）
+        ② **直接挂在 <measure> 下**（31 处 —— 没有可视记号，最容易漏）
+          <measure number="20">
+            <sound tempo="140"/>
+            <note .../>
+
+    返回 (新内容, 补了几处)。
+    """
+    added = [0]
+
+    # 先算出所有 <direction> 的范围，后面判断某个 <sound> 在不在里面
+    dir_spans = [(m.start(), m.end(), '<metronome' in m.group(0))
+                 for m in re.finditer(r'<direction\b[^>]*>[\s\S]*?</direction>', src)]
+
+    def in_dir_with_metronome(pos):
+        for a, b, has_met in dir_spans:
+            if a <= pos < b:
+                return has_met
+        return False
+
+    out = []
+    last = 0
+    for m in re.finditer(r'<sound\b[^>]*\btempo="([^"]+)"', src):
+        pos = m.start()
+        if in_dir_with_metronome(pos):
+            continue
+        try:
+            bpm = float(m.group(1))
+        except ValueError:
+            continue
+        txt = str(int(round(bpm))) if abs(bpm - round(bpm)) < 1e-9 else f'{bpm:g}'
+        ins = ('<direction placement="above"><direction-type><metronome>'
+               f'<beat-unit>quarter</beat-unit><per-minute>{txt}</per-minute>'
+               '</metronome></direction-type></direction>')
+        out.append(src[last:pos])
+        out.append(ins)
+        last = pos
+        added[0] += 1
+    out.append(src[last:])
+
+    return ''.join(out), added[0]
 
 
 def process(path, dry=False):
@@ -100,16 +177,37 @@ def process(path, dry=False):
 
     changes = []
 
-    def repl(m):
-        new_inner, note = fix_metronome_inner(m.group(1))
+    def do_direction(dm):
+        seg = dm.group(0)
+        met = re.search(r'<metronome\b[^>]*>([\s\S]*?)</metronome>', seg)
+        if not met:
+            return seg
+        # 同一个 <direction> 里的 <sound tempo> —— MuseScore 的权威值
+        snd = re.search(r'<sound\b[^>]*\btempo="([^"]+)"', seg)
+        st = None
+        if snd:
+            try:
+                st = float(snd.group(1))
+            except ValueError:
+                st = None
+        new_inner, note = fix_metronome_inner(met.group(1), st)
         if new_inner is None:
             if note:
                 changes.append(('skip', note))
-            return m.group(0)
+            return seg
         changes.append(('fix', note))
-        return '<metronome' + m.group(0)[len('<metronome'):m.group(0).index('>') + 1] + new_inner + '</metronome>'
+        head = met.group(0)[:met.group(0).index('>') + 1]
+        return seg.replace(met.group(0), head + new_inner + '</metronome>', 1)
 
-    out = METRONOME_RE.sub(repl, src)
+    out = DIRECTION_RE.sub(do_direction, src)
+
+    # ② 给缺失的 <sound tempo> 补 <metronome>
+    #    （AlphaTab 只读 metronome，不补的话整曲会按第一个速度播到底）
+    out2, n_added = ensure_metronomes(out)
+    if n_added:
+        changes.append(('add', f'补了 {n_added} 处缺失的谱面速度记号'
+                              f'（AlphaTab 只读谱面记号，不补会按第一个速度播到底）'))
+        out = out2
 
     name = os.path.basename(path)
     if not changes:
@@ -127,7 +225,7 @@ def process(path, dry=False):
     elif dry:
         print(f'    → （dry run，未写入）')
 
-    return sum(1 for k, _ in changes if k == 'fix')
+    return sum(1 for k, _ in changes if k in ('fix', 'add'))
 
 
 def main():

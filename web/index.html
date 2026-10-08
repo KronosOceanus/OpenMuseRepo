@@ -157,6 +157,12 @@
     border-radius: 2px;
     box-shadow: 0 0 4px rgba(168, 85, 220, .5);
   }
+  /* 整声部空缺：琥珀色 —— 和红/绿（音符）、紫（记号）都区分开。
+     它不是"某处不同"，而是"这个声部压根没内容"，性质不同。 */
+  .cmp-sep.warn { color: #e0a33a; }
+  .cmp-row.missing .who { color: #e0a33a; }
+  .cmp-row.missing .mkbody { color: #f0c070; font-size: 11px; }
+  .cmp-row.missing { cursor: default; }
   .cmp-sep {
     padding: 7px 12px 4px; font-size: 11px; color: #a855dc;
     border-top: 1px solid var(--line); margin-top: 5px;
@@ -308,7 +314,7 @@
 (function () {
   'use strict'
 
-  var BUILD = 'build-78'
+  var BUILD = 'build-90'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
@@ -371,8 +377,22 @@
   function autoScroll() { return AUTO_SCROLL }
 
   var zoomRatio = 1
+  var baseScale = 1        // 当前曲目的 display.scale（只在诊断里报出来）
   function markDx() { return MARK_DX * zoomRatio }
   function markDy() { return MARK_DY * zoomRatio }
+
+  // ⚠️ 试过让偏移按 display.scale 等比放大（0.5 标定 → 1.0 时翻倍），
+  //    **撤回了**，因为和实测对不上：
+  //      神话2（scale 0.75）和优纪（scale 1.0）在固定 8px 下是正常的，
+  //      翻倍会从 8px 变成 12px / 16px —— 把已经对的弄坏。
+  //    ⟹「漂移正比于缩放」这个模型不成立。
+  //
+  //    而 Dreamy 那个「钟琴的框跑到钢琴低音谱表」是**整行谱表**的距离
+  //    （几十像素），量级上不可能是几像素的偏移问题 ——
+  //    真因是谱表区间算错（见下面的 staffRanges）。
+  //
+  //    以后真遇到小的纵向偏移：先用 ?mdy=N 手工标定出对的值，
+  //    再决定要不要写成公式。**别凭猜测改已经验证过的东西。**
 
   // 排版参数（默认值是在 11 声部总谱上实调出来的，见 web/README.md）
   function numParam(n, d) { var v = params.get(n); if (v === null || v === '') return d; var x = Number(v); return isNaN(x) ? d : x }
@@ -635,6 +655,7 @@
     var layer = document.createElement('div')
     layer.className = 'om-diff-layer'
     var n = 0
+    var byTrack = {}          // track → 实际标出来的处数
 
     // ── 记号差异：小节左边缘一条紫色竖条 ──
     // 方向类（速度/力度/文字）和挂载类（连音线/跳音）都画，
@@ -660,18 +681,49 @@
       })
     }
 
-    // ⚠️ 谱表 → track 的映射不能靠「声部数整除」推。
-    //    一个 track 可能占多个谱表（钢琴 2 个），所以 11 个 track 对应
-    //    12 个谱表 —— 12/11=1.09，整除推算从第 9 个 track 起就偏了，
-    //    标记会落到隔壁乐器上。
+    // ── 谱表 → track 的对应 ──────────────────────────────────────
     //
-    //    正确做法：用 api.tracks[i].staves 建一张「谱表 index → track index」
-    //    的表，然后按 MasterBarBounds.bars[bi].bar.staff.index 查。
-    var staffToTrack = {}
+    // ⚠️⚠️ **不要用 `api.tracks[i].staves[j].index`。**
+    //
+    //    那个 index 是**track 内的序号**，不是全局谱表号。实测
+    //    Dreamy（钢琴 2 谱表 + 钟琴 + 玻璃琴）：
+    //        钢琴   2 谱表 → index 0, 1     ← 看着像全局，其实也是 track 内
+    //        钟琴   1 谱表 → index 0        ← 应该是全局 2
+    //        玻璃琴 1 谱表 → index 0        ← 应该是全局 3
+    //    三个 track 都往 key `0` 写，最后建出来的是 {"0":2,"1":0} ——
+    //    映射彻底失效，退回「按声部数整除」（4÷3=1.33），于是
+    //    钢琴只拿到高音谱表、钟琴的池子里混进钢琴的低音谱表，
+    //    标记就落到别的声部/别的音上了。
+    //
+    //    ✅ **正确做法：按顺序累积。**
+    //       MasterBarBounds.bars 在一个系统里就是按谱表顺序排的，
+    //       而 track 也是按顺序占若干个谱表 —— 直接累加出区间。
+    //       不依赖任何 .index 字段。
+    var staffRanges = []      // [{track, from, to}]
+    var acc2 = 0
     ;(api.tracks || []).forEach(function (t) {
-      ;(t.staves || []).forEach(function (st) { staffToTrack[st.index] = t.index })
+      var n = (t.staves || []).length || 1
+      staffRanges.push({ track: t.index, from: acc2, to: acc2 + n })
+      acc2 += n
     })
-    var hasMap = Object.keys(staffToTrack).length > 0
+    var totalStaves = acc2 || 1
+
+    // ── 映射诊断（一次性）──────────────────────────────────────
+    // 「标记落到别的声部」几乎都出在这里，之前一行日志都没有，只能猜。
+    if (DEBUG) {
+      var trkInfo = (api.tracks || []).map(function (t) {
+        return '#' + t.index + '(' + (t.name || '') + ')×' + ((t.staves || []).length || 1) + '谱表'
+      })
+      log('  声部：tracks=' + (api.tracks || []).length + '  ' + trkInfo.join('  ')
+          + '   共占谱表 ' + totalStaves)
+      log('  谱表区间：' + staffRanges.map(function (r) {
+        return 'track' + r.track + '→[' + r.from + ',' + r.to + ')'
+      }).join('  '))
+      log('  （staves[j].index 是 track 内序号，**不是**全局谱表号：'
+          + (api.tracks || []).map(function (t) {
+              return '#' + t.index + ':' + (t.staves || []).map(function (st) { return st.index }).join(',')
+            }).join('  ') + '）')
+    }
 
     // 按小节汇总，省得每个条目都查一次坐标
     var byMeasure = {}
@@ -685,6 +737,14 @@
       var bars = mb.bars || []
 
       byMeasure[idx].forEach(function (m) {
+        // ⚠️ 按【栏】分别计数 —— diff 对象是两栏共用的，用一个全局计数
+        //    会被左栏吃掉前 12 条，右栏就一条日志都打不出来，
+        //    看着像"右栏完全没画"。这个坑差点让我误判。
+        if (DEBUG) {
+          drawDiff._n = drawDiff._n || {}
+          drawDiff._n[side] = (drawDiff._n[side] || 0) + 1
+          m._dbg = drawDiff._n[side] <= 12
+        }
         // ⚠️ 这里原来有 `if (m.track == null) return` —— 是「按下标配对」
         //    时代的残留守卫。改用按名字配对后，清单里只有 trackA/trackB、
         //    **不再有 track**，于是这行每次都命中、直接 return，
@@ -696,29 +756,27 @@
         //    所以要用 diff 里给的 trackA / trackB，不能假设两边同号。
         var wantTrack = (side === 'base') ? m.trackA : m.trackB
         if (wantTrack == null) wantTrack = m.track + (trackOffset || 0)  // 兼容旧格式
-        var from = 0, to = bars.length
-        var how = '整除推算'
-        if (hasMap) {
-          var f2 = -1, t2 = -1
-          for (var bi0 = 0; bi0 < bars.length; bi0++) {
-            var stf = bars[bi0].bar && bars[bi0].bar.staff
-            var ti = stf ? staffToTrack[stf.index] : undefined
-            if (ti === wantTrack) { if (f2 < 0) f2 = bi0; t2 = bi0 + 1 }
-          }
-          if (f2 >= 0) { from = f2; to = t2; how = '按 staff→track 表' }
-          else {
-            // ⚠️ 查不到不能直接 return —— 那样一个小节都标不出来。
-            //    退回按声部数整除推算（一个 track 一个谱表时是对的），
-            //    并记下来，方便排查映射为什么失效。
-            var perTrack = bars.length / (((api.tracks || []).length) || 1)
-            from = Math.floor(wantTrack * perTrack)
-            to = Math.min(bars.length, Math.max(from + 1, Math.floor((wantTrack + 1) * perTrack)))
-            how = '整除推算（映射没查到）'
-            if (DEBUG && !drawDiff._warned) {
-              drawDiff._warned = true
-              log('  ⚠️ staff→track 映射没命中（wantTrack=' + wantTrack +
-                  '，表里有 ' + Object.keys(staffToTrack).length + ' 项）→ 退回整除推算', 'warn')
-            }
+        // 找到这个 track 占的谱表区间
+        var range = null
+        for (var ri = 0; ri < staffRanges.length; ri++) {
+          if (staffRanges[ri].track === wantTrack) { range = staffRanges[ri]; break }
+        }
+        var from, to, how
+        if (range && bars.length >= totalStaves) {
+          from = Math.min(range.from, bars.length)
+          to = Math.min(range.to, bars.length)
+          how = '按声部谱表区间'
+        } else {
+          // 退路：谱表总数对不上（正常不该发生 —— 说明某个系统里
+          // 没有包含全部谱表）。退回按声部数整除。
+          var perTrack = bars.length / (staffRanges.length || 1)
+          from = Math.floor(wantTrack * perTrack)
+          to = Math.min(bars.length, Math.max(from + 1, Math.floor((wantTrack + 1) * perTrack)))
+          how = '整除推算（谱表数 ' + bars.length + ' ≠ ' + totalStaves + '）'
+          if (DEBUG) {
+            log('  ⚠️ 谱表区间对不上：本系统 bars=' + bars.length
+                + '，api.tracks 共占谱表 ' + totalStaves
+                + ' → 退回整除推算（这会让标记错位）', 'bad')
           }
         }
         var want = m[key]
@@ -734,7 +792,24 @@
           ;(bb.beats || []).forEach(function (bt) {
             var tick = bt.beat ? bt.beat.displayStart : null
             ;(bt.notes || []).forEach(function (nb) {
-              pool.push({ nb: nb, tick: tick, pitch: nb.note ? nb.note.realValue : null })
+              // ⚠️⚠️ **必须用 displayValue（记谱音高），不能用 realValue。**
+              //
+              //    realValue 是**实际发声音高**，已经把乐器的移调算进去了。
+              //    而差异清单里的 pitch 来自 MusicXML 的 <pitch> —— 那是记谱音高。
+              //
+              //    实测 Dreamy 的钟琴（glockenspiel）：谱上写 E5/B4，
+              //    AlphaTab 的 realValue 给的是 E7/B6（高两个八度）——
+              //    差了 24 个半音，一个都匹配不上 → 钟琴完全没有红绿标记。
+              //
+              //    钢琴是 C 调乐器，两者相同，所以它一直正常 —— 这个 bug
+              //    只在移调乐器上发作（Bb 单簧管、钟琴、萨克斯… 都会中）。
+              pool.push({
+                nb: nb, tick: tick,
+                pitch: nb.note
+                  ? (nb.note.displayValue != null ? nb.note.displayValue : nb.note.realValue)
+                  : null,
+                real: nb.note ? nb.note.realValue : null,
+              })
             })
           })
         }
@@ -742,12 +817,50 @@
         var hits = pool.filter(function (o) {
           return want.some(function (x) { return x.pitch === o.pitch && x.tick === o.tick })
         })
-        var relaxed = false
+        var wantCount = (m[key] || []).length
+        var relaxed = false, dropped = 0
         if (!hits.length) {
-          hits = pool.filter(function (o) {
+          // ⚠️ 退化成「音高 + 最近位置」。
+          //
+          //    实测需要这一步：清单的 tick 和页面算出来的会差 1 个 tick
+          //    （取整方式不同），精确匹配就落空了。
+          //
+          //    **但不要在这里排除"有歧义的音高"。**
+          //    试过：同一个音高出现两次就全部丢弃 —— 结果
+          //    改后有两个 F4，差异清单要标第一个，却因为"有两个 F4"
+          //    把两个都扔了，绿框一个都没有。
+          //
+          //    「最近的那个」这个信息已经足够定位了；再叠一层歧义判断
+          //    只会造成漏标。**漏标比标错更难发现** —— 实测就是这么
+          //    漏掉了一处，靠肉眼逐个核对才看出来。
+          var cand = pool.filter(function (o) {
             return want.some(function (x) { return x.pitch === o.pitch })
           })
+          // 同一音高只保留最近的那一个（按 want 里的 tick 距离）
+          var used = {}
+          hits = []
+          cand.forEach(function (o) {
+            var d = 1e9
+            want.forEach(function (x) {
+              if (x.pitch === o.pitch) d = Math.min(d, Math.abs(x.tick - o.tick))
+            })
+            var key = o.pitch
+            if (!(key in used) || d < used[key].d) {
+              if (used[key]) hits.splice(hits.indexOf(used[key].o), 1)
+              used[key] = { d: d, o: o }
+              hits.push(o)
+            }
+          })
           relaxed = hits.length > 0
+        }
+
+        if (DEBUG && (m._dbg || dropped || !hits.length)) {
+          log('    小节 ' + m.number + ' ' + (m.trackName || '') +
+              '：wantTrack=' + wantTrack + ' 谱表 ' + from + '..' + to +
+              '（' + how + '）本系统 bars=' + bars.length + ' 应=' + totalStaves +
+              ' 池 ' + pool.length + ' 命中 ' + hits.length
+              + (relaxed ? '　[按音高兜底]' : '')
+              + (dropped ? '　**丢弃有歧义的 ' + dropped + ' 个**' : ''), 'warn')
         }
         if (DEBUG && !drawDiff._saidHow) {
           drawDiff._saidHow = true
@@ -757,10 +870,35 @@
           log('    小节 ' + m.number + ' track ' + m.track + '：tick 没对上，退化成按音高标了 ' + hits.length + ' 处', 'warn')
         }
 
+        // ⚠️⚠️ **标不出来必须出声。**
+        //
+        //    清单说"这一小节这个声部改了 N 处"，页面却一个框都没画 ——
+        //    这是本工具最阴的失败模式：没有报错、没有日志，
+        //    表现就是"某些声部完全没有红绿标记"，而人会以为"没差异"。
+        //
+        //    实测踩过：Dreamy 的钟琴有 1 处改动，因为谱表区间算错，
+        //    池子里装的是钢琴的低音谱表 → 命中 0 → 静默什么都不画。
+        var drawnHere = 0
+        if (wantCount && hits.length === 0) {
+          if (DEBUG) {
+            log('  ❌ 小节 ' + m.number + '（' + (m.trackName || '') + '）：清单说改了 '
+                + wantCount + ' 处，但**一个都没标出来**'
+                + '　[wantTrack=' + wantTrack + ' 谱表 ' + from + '..' + to
+                + ' 池 ' + pool.length
+                + ' 池内记谱 ' + JSON.stringify(
+                    pool.slice(0, 12).map(function (o2) { return o2.pitch }))
+                + ' 池内实音 ' + JSON.stringify(
+                    pool.slice(0, 12).map(function (o2) { return o2.real }))
+                + ' 待标 ' + JSON.stringify(want.slice(0, 6).map(function (x) { return x.pitch }))
+                + ']', 'bad')
+          }
+        }
+
         hits.forEach(function (o) {
               var nb = o.nb
               var b = nb.noteHeadBounds
               if (!b) return
+              drawnHere++
               var d = document.createElement('div')
               d.className = 'om-diff-mark ' + MARK + ' ' + color
               var cx = b.x + b.w / 2 + markDx()
@@ -785,9 +923,41 @@
               }
               layer.appendChild(d)
               n++
+              byTrack[wantTrack] = (byTrack[wantTrack] || 0) + 1
         })
       })
     })
+
+    // ── 按声部汇总：一眼看出「哪个声部一处都没标」 ──────────────
+    // 那几乎总是出问题了 —— 清单说改了，画面上一个框都没有，
+    // 而人看到的只是"这里没差异"。
+    if (DEBUG) {
+      // 第一次渲染往往什么都没画（坐标还没就绪），那种 0 处是正常的，
+      // 报出来只会误导。所以：清单里本来就没有东西时就不报了。
+      var wantByTrack = {}
+      diff.measures.forEach(function (m) {
+        var t = (side === 'base') ? m.trackA : m.trackB
+        var k = (m.trackName || '?') + ' #' + t
+        wantByTrack[k] = wantByTrack[k] || { want: 0, track: t }
+        wantByTrack[k].want += (m[(side === 'base' ? 'removed' : 'added')] || []).length
+      })
+      var lines = Object.keys(wantByTrack).map(function (k) {
+        // ⚠️ 这里原来写的是 `var w = wantByTrack[k].want` —— 取出来是**数字**，
+        //    接着又用 `w.track`，得到 undefined，于是 byTrack[undefined] 恒为 0。
+        //    结果每一栏都报「❌ 一处都没标」，而标记其实全都画对了。
+        //    **诊断本身出错比没有诊断更糟** —— 它把人引向不存在的 bug。
+        var w = wantByTrack[k]                 // 要的是整个对象
+        var got = byTrack[w.track] || 0
+        var mark = (w.want > 0 && got === 0) ? '  ❌ 一处都没标'
+                 : (got < w.want ? '  ⚠️ 少标了' : '')
+        return k + ' 待标 ' + w.want + ' → 实标 ' + got + mark
+      })
+      log('  ' + side + ' 栏标记：共 ' + n + ' 处（本栏 tracks=' + (api.tracks || []).length
+          + ' 应占谱表=' + totalStaves + '）　｜　' + lines.join('　｜　'),
+          Object.keys(wantByTrack).some(function (k) {
+            return wantByTrack[k].want > 0 && !(byTrack[wantByTrack[k].track] > 0)
+          }) ? 'bad' : undefined)
+    }
 
     host.appendChild(layer)
     return n
@@ -945,6 +1115,31 @@
       }
       list.appendChild(row)
     })
+
+    // ── 整声部空缺（另起一段）───────────────────────────────────
+    // 摆最前面 —— 它改变的是"这个声部能不能比"，
+    // 比具体某处的红绿框更根本。
+    if ((diff.missingParts || []).length) {
+      var mpSep = document.createElement('div')
+      mpSep.className = 'cmp-sep warn'
+      mpSep.textContent = '整声部空缺（' + diff.missingParts.length
+        + ' 个：一侧整曲无内容，可能没扒 —— 未逐音符比较）'
+      list.appendChild(mpSep)
+      diff.missingParts.forEach(function (m) {
+        var row = document.createElement('div')
+        row.className = 'cmp-row missing'
+        var no = document.createElement('span'); no.className = 'no'
+        no.textContent = m.emptySide === 'A' ? diff.base : diff.head
+        var who = document.createElement('span'); who.className = 'who'
+        who.textContent = m.name
+        var body = document.createElement('span')
+        body.className = 'mkbody'
+        var have = m.emptySide === 'A' ? m.notesB : m.notesA
+        body.textContent = '整曲无内容，另一侧 ' + have + ' 个音'
+        row.appendChild(no); row.appendChild(who); row.appendChild(body)
+        list.appendChild(row)
+      })
+    }
 
     // ── 记号差异（另起一段）─────────────────────────────────────
     // 单列一段而不是混在音符差异里 —— 性质不同：
@@ -1808,12 +2003,13 @@
             if (mk) diff.marks = mk
             var nm = diff.diffCount || 0
             var mm = mk ? (mk.markCount || 0) : 0
-            log('读到 音符差异 ' + nm + ' 处，记号差异 ' + mm + ' 处',
-                (nm || mm) ? 'ok' : 'warn')
-            // ⚠️ 不能只看 diffCount —— **只有记号改动时音符差异是 0**，
-            //    旧写法会直接显示「两个版本完全一致」并 return，
-            //    压根不进对比模式（实测踩过）。
-            if (!nm && !mm) { sh.textContent = '两个版本完全一致。'; return }
+            var pm = diff.missingCount || 0
+            log('读到 音符差异 ' + nm + ' 处，记号差异 ' + mm + ' 处，'
+                + '整声部空缺 ' + pm + ' 个', (nm || mm || pm) ? 'ok' : 'warn')
+            // ⚠️ **三样都要看**：音符差异、记号差异、整声部空缺。
+            //    漏掉任何一个都会误报「完全一致」并 return，
+            //    压根不进对比模式 —— 这个错犯过两次（先漏记号，又漏空缺）。
+            if (!nm && !mm && !pm) { sh.textContent = '两个版本完全一致。'; return }
             showCompare(piece, diff)
           })
           .catch(function (e) {

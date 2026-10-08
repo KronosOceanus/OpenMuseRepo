@@ -109,16 +109,43 @@ def measure_notes(measure_el, divisions):
 
     d = divisions or 1
     for n in out:
-        n['tick'] = int(round(n['onset'] / d * TICKS_PER_QUARTER))
+        # ⚠️ 必须和 AlphaTab 的算法一致：**整除**，不是四舍五入。
+        #     实测 onset=144、divisions=56 → 144/56*960 = 2468.57
+        #         round → 2469 （清单里写的）
+        #         整除 → 2468 （AlphaTab 的 displayStart 给的）
+        #     差 1 个 tick 的后果：页面上「音高 + 位置精确匹配」全部失手，
+        #     只能落到兜底匹配 —— 实测因此漏掉了一处绿框。
+        n['tick'] = (n['onset'] * TICKS_PER_QUARTER) // d
         n['name'] = midi_to_name(n['pitch'])
     return out
+
+
+# AlphaTab 的 tick：960 = 一个四分音符。
+# 容差取 1/32 音符 —— 只吸收换算的舍入误差，**不吸收真正的位移**。
+TICK_TOL = 30
 
 
 def diff_notes(a, b):
     """a 里有、b 里没有的音（按「音高 + 位置」配对，按重数算）。
 
-    先按 (pitch, tick) 精确配对，配不上的再按 pitch 配一遍 ——
-    这样即使两边的 division 换算有一点点出入，也不会漏掉整处改动。
+    两轮匹配：
+      第一轮  音高 + 位置都要对得上
+      第二轮  音高相同，且**位置差在容差内**才配对
+
+    ⚠️ 第二轮原来写的是「只按音高」—— 那会把**移动了位置的音**当成
+    「没变」，于是：
+
+        原版 第5小节   C5@1拍  C#5@2拍  D5@3拍
+        改后 第5小节   D5@1拍  C#5@2拍  B4@3拍
+                                              （真实改动是 2 处：C5→D5、D5→B4）
+
+    旧逻辑：原版的 D5@3拍 和改后的 D5@1拍 音高相同 → 配对成"没变"，
+            于是只报「删 C5、加 B4」—— 少报一处，而且红框和绿框
+            落在了**不同的拍**上（一个第1拍、一个第3拍），
+            看着像"标记乱标"，其实是清单就报错了。
+
+    加上位置容差之后：真正的位移会被报成「删原音 + 加新音」，
+    两边标在**同一拍**上。
     """
     remaining = list(b)
     out = []
@@ -132,17 +159,35 @@ def diff_notes(a, b):
         else:
             out.append(n)
 
-    # 第二轮：只看音高（位置换算可能有偏差时兜底）
+    # 第二轮：音高相同，位置差在容差内（取最接近的那个）
     still = []
     for n in out:
+        best, best_d = -1, TICK_TOL + 1
         for i, r in enumerate(remaining):
-            if r['pitch'] == n['pitch']:
-                remaining.pop(i)
-                break
+            if r['pitch'] != n['pitch']:
+                continue
+            d = abs(r['tick'] - n['tick'])
+            if d < best_d:
+                best_d, best = d, i
+        if best >= 0:
+            remaining.pop(best)
         else:
             still.append(n)
 
     return still
+
+
+def count_pitched(part_el):
+    """这个声部整曲有多少个**实际发声**的音（休止符和后缀和弦音不算）。"""
+    n = 0
+    for m in part_el.findall('measure'):
+        for x in m.findall('note'):
+            if x.find('rest') is not None:
+                continue
+            if x.find('chord') is not None:
+                continue          # 和弦里除第一个音之外的
+            n += 1
+    return n
 
 
 def part_display_names(root):
@@ -205,24 +250,40 @@ def build_diff(path_a, path_b=None, label_a=None, label_b=None):
         # 第 7、8、9 位 vs 第 0、1、2 位。按下标比会拿双簧管去比长笛。
         #
         # 所以按 <part-name> 配对。名字对不上的声部就跳过，并记下来。
-        idx_a_by_name = {}
-        for i, p in enumerate(pa):
-            nm = na.get(p.get('id'), '').strip()
+        #
+        # ⚠️⚠️ **重名必须按顺序一一配对，不能只取第一个。**
+        #
+        #    合奏谱里「乐队小提琴」出现两次、「圆号 1/2」之类非常常见。
+        #    原来用 setdefault(nm, i) 只记第一个 —— 第二个**静默消失**，
+        #    既不比较、也不出现在 unmatched 里，报告只说「配上 7 个」。
+        #    实测 世界献礼：两个「乐队小提琴」共 81 个音，其中 47 个
+        #    从来没被比过，而用户收不到任何提示。
+        from collections import defaultdict
+        ga, gb = defaultdict(list), defaultdict(list)
+        for i, pp in enumerate(pa):
+            nm = na.get(pp.get('id'), '').strip()
             if nm:
-                idx_a_by_name.setdefault(nm, i)
-        idx_b_by_name = {}
-        for i, p in enumerate(pb):
-            nm = nb.get(p.get('id'), '').strip()
+                ga[nm].append(i)
+        for i, pp in enumerate(pb):
+            nm = nb.get(pp.get('id'), '').strip()
             if nm:
-                idx_b_by_name.setdefault(nm, i)
+                gb[nm].append(i)
 
         matched = []
-        for nm, ia in idx_a_by_name.items():
-            if nm in idx_b_by_name:
-                matched.append((nm, ia, idx_b_by_name[nm]))
+        dup_warn = []          # 同名数量不一致
+        for nm in ga:
+            if nm not in gb:
+                continue
+            la, lb = ga[nm], gb[nm]
+            if len(la) != len(lb):
+                dup_warn.append({'name': nm, 'countA': len(la), 'countB': len(lb)})
+            for k in range(min(len(la), len(lb))):
+                # 重名时加序号后缀，免得差异清单里分不清是哪一个
+                label = nm if len(la) == 1 and len(lb) == 1 else f'{nm} #{k + 1}'
+                matched.append((label, la[k], lb[k]))
         matched.sort(key=lambda x: x[1])
-        unmatched_a = sorted(set(idx_a_by_name) - set(idx_b_by_name))
-        unmatched_b = sorted(set(idx_b_by_name) - set(idx_a_by_name))
+        unmatched_a = sorted(n for n in ga if n not in gb)
+        unmatched_b = sorted(n for n in gb if n not in ga)
 
         if not matched:
             raise SystemExit(
@@ -234,7 +295,32 @@ def build_diff(path_a, path_b=None, label_a=None, label_b=None):
         items = []
         total_common = 0
         truncated = False
+        missing = []          # 整声部空缺
         for nm, ia, ib in matched:
+            # ── 整声部空缺检测 ────────────────────────────────────
+            #
+            # 扒谱场景里很常见：**某个声部压根没扒**（谱表留着、内容全休止）。
+            # 这时逐音符比会报出成百条「新增」，用户会读成
+            # 「改了这么多地方」，实际是"这一侧根本没扒"。
+            #
+            # 实测 moonlight：双簧管 A 侧 0 个音、B 侧 63 个 —— 逐音符比
+            # 就是 63 条噪音，把真正的差异埋掉了。
+            #
+            # 判据只取**确凿的零**：一侧 0、另一侧有内容。
+            # 「接近 0」不做硬判 —— 那是我替用户下结论；数量会照常
+            # 出现在报告里，由人判断。
+            nA, nB = count_pitched(pa[ia]), count_pitched(pb[ib])
+            if nA == 0 and nB == 0:
+                continue                    # 两边都没内容，没什么可比的
+            if nA == 0 or nB == 0:
+                missing.append({
+                    'name': nm,
+                    'trackA': ia, 'trackB': ib,
+                    'notesA': nA, 'notesB': nB,
+                    'emptySide': 'A' if nA == 0 else 'B',
+                })
+                continue                    # 不比了 —— 比出来全是噪音
+
             ma_i = pa[ia].findall('measure')
             mb_i = pb[ib].findall('measure')
             common_i = min(len(ma_i), len(mb_i))
@@ -285,10 +371,15 @@ def build_diff(path_a, path_b=None, label_a=None, label_b=None):
             'matched': [{'name': n, 'trackA': a, 'trackB': b} for n, a, b in matched],
             'unmatchedA': unmatched_a,
             'unmatchedB': unmatched_b,
+            # 同名数量不一致（比如一边两个「乐队小提琴」、一边一个）
+            'dupWarn': dup_warn,
             'measureCount': total_common,
             'truncated': truncated,
             'diffCount': len(items),
             'measures': items,
+            # 整声部空缺（一侧整曲无内容）—— 单独列出来，不混进逐音符差异
+            'missingParts': missing,
+            'missingCount': len(missing),
         }
     common = min(len(ma), len(mb))
 
@@ -350,9 +441,29 @@ def render_text(d):
     if d['truncated']:
         L.append(f'  ⚠️ 两个版本小节数不同，只比了公共的 {d["measureCount"]} 小节')
         L.append('')
-    if not d['measures']:
+
+    # ⚠️ 判断"完全一致"要看**三样**：音符差异、记号差异、整声部空缺。
+    #    漏掉任何一个都会误报「完全一致」—— 这个错在本项目犯过两次
+    #    （先漏 marks，这次又漏 missingParts）。
+    if not d['measures'] and not d.get('missingParts'):
         L.append('  两个版本完全一致。')
         return '\n'.join(L)
+
+    if d.get('missingParts'):
+        L.append('  ── 整声部空缺（一侧整曲无内容，可能没扒）──')
+        L.append('')
+        for m in d['missingParts']:
+            have = m['notesB'] if m['emptySide'] == 'A' else m['notesA']
+            L.append(f'  {m["name"]}：{m["emptySide"]} 侧整曲无内容，'
+                     f'另一侧 {have} 个音')
+            L.append(f'      ⟹ 不逐音符比较（否则会报 {have} 处假差异）')
+        L.append('')
+
+    if d.get('dupWarn'):
+        L.append('  ⚠️ 同名声部数量不一致（只配了较少的那一侧）：')
+        for w in d['dupWarn']:
+            L.append(f'     {w["name"]}：左 {w["countA"]} 个，右 {w["countB"]} 个')
+        L.append('')
 
     for it in d['measures']:
         tag = f'（{it["trackName"]}）' if it.get('trackName') else ''
@@ -362,7 +473,9 @@ def render_text(d):
         if it['added']:
             L.append('    + 绿　' + '、'.join(x['name'] for x in it['added']))
         L.append('')
-    L.append(f'  共 {d["diffCount"]} 个小节有差异（全谱 {d["measureCount"]} 小节）')
+
+    L.append(f'  共 {d["diffCount"]} 个小节有音符差异（全谱 {d["measureCount"]} 小节）'
+             + (f'，另 {d["missingCount"]} 个声部整曲空缺' if d.get('missingCount') else ''))
     return '\n'.join(L)
 
 
