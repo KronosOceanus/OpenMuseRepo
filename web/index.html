@@ -308,7 +308,7 @@
 (function () {
   'use strict'
 
-  var BUILD = 'build-77'
+  var BUILD = 'build-78'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
@@ -812,6 +812,30 @@
   }
 
   var state = null   // 对比模式的全局状态（供底部控制条用）
+
+  /** 校验一份清单确实是「这一对文件」比出来的。
+   *
+   *  清单里有 source 字段（由对比脚本写入，形如
+   *  「a.musicxml ↔ b.musicxml」）。如果它和条目的 file/compareFile
+   *  对不上，说明 pieces.json 里挂错了清单 ——
+   *
+   *  ⚠️ 挂错**不会报任何错**，只是页面显示的是别的两份文件的差异。
+   *     实测踩过：给「只有记号改动」的条目挂了「音符改动版」的清单，
+   *     于是那个本该 0 条音符差异的页面冒出一堆红绿框。
+   *
+   *  ⟹ 这里显式校验，对不上就拒绝渲染并说明原因 —— 宁可什么都不画，
+   *     也不要画错的。
+   */
+  function checkSource(label, data, piece) {
+    if (!data || !data.source) return true          // 旧清单没这个字段，放过
+    var want = String(piece.file).split('/').pop() + ' ↔ ' +
+               String(piece.compareFile).split('/').pop()
+    if (data.source === want) return true
+    log('⚠️ ' + label + ' 的 source 对不上！', 'bad')
+    log('    清单里写的：' + data.source, 'bad')
+    log('    这个条目的：' + want, 'bad')
+    return false
+  }
 
   function showCompare(piece, diff) {
     el.title.textContent = piece.title || piece.id
@@ -1768,6 +1792,19 @@
         Promise.all(jobs)
           .then(function (res) {
             var diff = res[0], mk = res[1]
+
+            // ⚠️ 先校验清单和条目是不是同一对文件 —— 挂错了就什么也别画。
+            var bad = []
+            if (!checkSource('音符清单', diff, piece)) bad.push('音符清单')
+            if (mk && !checkSource('记号清单', mk, piece)) bad.push('记号清单')
+            if (bad.length) {
+              sh.innerHTML = '❌ ' + bad.join(' / ') + ' 与这个条目不是同一对文件，'
+                + '拒绝渲染（画出来会是别的曲子的差异）。<br>'
+                + '展开诊断面板看具体是哪两个文件名。'
+              sh.style.color = '#ff6b6b'
+              return
+            }
+
             if (mk) diff.marks = mk
             var nm = diff.diffCount || 0
             var mm = mk ? (mk.markCount || 0) : 0
