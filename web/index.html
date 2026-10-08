@@ -201,12 +201,19 @@
   .cmp-row .ad { color: #6ee06e; }
   .cmp-row .arrow { color: var(--dim); }
 
-  /* ── 缩放按钮（右下角）── */
+  /* ── 缩放 / 滚动开关 ────────────────────────────────────────────
+     ⚠️ 原来是 position:fixed; bottom:64px 的浮动盒子 —— 那个位置
+        正好压在差异列表标题行的【展开】按钮上（按钮右对齐，
+        而盒子也在右边），z-index 2000 压着，按钮点不到。
+        症状很怪：先展开诊断面板、布局位移之后按钮才能点。
+
+        现在改成底部控制条里的最后一段：永远是右下角，
+        而且不覆盖任何可点元素。 */
   #zoom {
-    position: fixed; right: 16px; bottom: 64px; z-index: 2000;
     display: flex; align-items: center; gap: 2px;
-    background: rgba(30, 30, 36, .92); border: 1px solid var(--line);
-    border-radius: 8px; padding: 3px; box-shadow: 0 2px 10px rgba(0,0,0,.35);
+    margin-left: auto;          /* 推到控制条最右 */
+    background: var(--bg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 2px;
   }
   #zoom button {
     width: 32px; height: 30px; padding: 0; font-size: 17px; line-height: 1;
@@ -266,22 +273,22 @@
   <span class="listen" id="listen" style="display:none">
     <span class="lbl">听：</span>
   </span>
-</footer>
-
-<div id="zoom" style="display:none">
+<div id="zoom">
   <button id="zOut" title="缩小">−</button>
   <span id="zVal" title="点一下恢复 100%">100%</span>
   <button id="zIn" title="放大">+</button>
   <span class="zsep"></span>
   <button id="zScroll" title="播放时是否自动滚动">⇅</button>
 </div>
+</footer>
+
 
 <script src="vendor/alphaTab.min.js"></script>
 <script>
 (function () {
   'use strict'
 
-  var BUILD = 'build-66'
+  var BUILD = 'build-72'
   var params = new URLSearchParams(location.search)
   var DEBUG = params.has('debug')
 
@@ -391,12 +398,12 @@
     hd.appendChild(cnt)
     var tg = document.createElement('span')
     tg.className = 'dbgToggle'
-    tg.textContent = '▲ 展开'
+    tg.textContent = '▲ 展开诊断'
     hd.appendChild(tg)
     hd.onclick = function () {
       var c = wrap.className.indexOf('collapsed') >= 0
       wrap.className = c ? '' : 'collapsed'
-      tg.textContent = c ? '▼ 收起' : '▲ 展开'
+      tg.textContent = c ? '▼ 收起诊断' : '▲ 展开诊断'
     }
     el.debug = document.createElement('div')
     el.debug.id = 'debug'
@@ -450,6 +457,28 @@
   //     后面所有代码（包括按钮绑定）都不执行 —— 表现是「点击毫无反应」，
   //     而且连日志都打不出来。见 web/README.md 的坑 ②⑦。
   // ═════════════════════════════════════════════════════════════════
+  /** 第 idx 小节（0 基）在整曲里的起始 tick。 */
+  function measureStartTick(api, idx) {
+    if (!api || !api.score || !api.score.masterBars) return 0
+    var mb = api.score.masterBars[idx]
+    return mb ? mb.start : 0
+  }
+
+  /** 把某一栏滚到指定小节（0 基）。
+   *
+   *  点差异列表时要显式调用 —— 自动滚动（scrollToCursor）只在播放中、
+   *  且光标出屏时才动，点列表时未必满足，所以点了没反应。
+   */
+  function scrollToMeasure(api, scoreEl, index) {
+    if (!api || !api.boundsLookup) return false
+    var mb = api.boundsLookup.findMasterBarByIndex(index)
+    if (!mb || !mb.realBounds) return false
+    var y = Math.max(0, mb.realBounds.y - 40)   // 上面留一点余量
+    try { scoreEl.scrollTo({ top: y, behavior: 'smooth' }) }
+    catch (e) { scoreEl.scrollTop = y }
+    return true
+  }
+
   /** 让差异列表跟着播放走：高亮当前小节那一行，并把它滚进视野。
    *
    *  注意不能用 row.scrollIntoView() —— 那会把**所有**可滚动祖先都滚一遍，
@@ -611,10 +640,12 @@
 
       byMeasure[idx].forEach(function (m) {
         if (m.track == null) return
-        // 合并谱里对比版的 track 要加偏移（base 用 t，head 用 N+t）
-        // 左右分栏：两个实例各自从 track 0 开始，offset=0
-        // 上下摞叠：一个实例含 2N 个 track，head 要加 N
-        var wantTrack = m.track + (trackOffset || 0)
+        // ⚠️ 声部是**按名字**配对出来的，两边的下标不一定相同。
+        //    例：moonlight melody 的 live 版和完整版共有的双簧管，
+        //    分别在两个文件的第 0 位和第 6 位。
+        //    所以要用 diff 里给的 trackA / trackB，不能假设两边同号。
+        var wantTrack = (side === 'base') ? m.trackA : m.trackB
+        if (wantTrack == null) wantTrack = m.track + (trackOffset || 0)  // 兼容旧格式
         var from = 0, to = bars.length
         var how = '整除推算'
         if (hasMap) {
@@ -780,7 +811,8 @@
     toggle.className = 'toggle'
     function setOpen(open) {
       list.className = 'body' + (open ? '' : ' hide')
-      toggle.textContent = open ? '▼ 收起' : '▲ 展开 ' + diff.measures.length + ' 条'
+      toggle.textContent = open ? '▼ 收起差异列表'
+                                : '▲ 展开差异列表（' + diff.measures.length + ' 条）'
     }
     toggle.onclick = function () { setOpen(list.className.indexOf('hide') >= 0) }
     setOpen(false)
@@ -805,16 +837,37 @@
                        '<span class="ad">' + esc(ad) + '</span>'
       row.appendChild(no); row.appendChild(who); row.appendChild(body)
       row.onclick = function () {
-        var tick = measureStartTick(state.apiA, m.index)
-        log('跳到第 ' + m.number + ' 小节（' + (m.trackName || '') +
-            '，tick ' + tick + '，播 ' + state.side + '）')
+        // ⚠️ 整个处理器包起来。
+        //    之前开头就是 `measureStartTick(state.apiA, ...)` ——
+        //    只要 state 还是 null 或别的什么，就在**第一行**抛出，
+        //    而 log 在它后面，所以表现是「点了毫无动静、日志里也没有」，
+        //    完全看不出哪里错了。
         try {
-          // ⚠️ 两个都 play 会同时出声 —— 实测"乱七八糟"。
-          //    只让当前选中的那个响，另一个只同步位置。
-          state.apiA.tickPosition = tick
-          state.apiB.tickPosition = tick
+          var tick = measureStartTick(apiA, m.index)
+          log('跳到第 ' + m.number + ' 小节（' + (m.trackName || '') +
+              '，tick ' + tick + '，播 ' + state.side + '）')
+          // 两个都设位置但只让选中的那个响
+          // （两个都 play 会同时出声，实测"乱七八糟"）
+          apiA.tickPosition = tick
+          apiB.tickPosition = tick
           curApi().play()
-        } catch (e) { log('跳转失败：' + e.message, 'bad') }
+        } catch (e) {
+          log('跳转失败：' + e.message, 'bad')
+          return
+        }
+
+        // 显式把**两栏都滚到那一小节**。
+        // 光设位置不够 —— 视图不会动，看着像"点了没反应"。
+        try {
+          var ra = scrollToMeasure(apiA, scoreA, m.index)
+          var rb = scrollToMeasure(apiB, scoreB, m.index)
+          log('  滚到第 ' + m.number + ' 小节：左=' + ra + ' 右=' + rb,
+              (ra || rb) ? 'ok' : 'warn')
+          listCur.v = -1
+          syncDiffList(curApi(), list, rowsByMeasure, listCur)
+        } catch (e) {
+          log('  滚动失败：' + e.message, 'bad')
+        }
       }
       list.appendChild(row)
     })
@@ -1411,7 +1464,6 @@
       }
       paintScroll()
     }
-    zoom.box.style.display = ''
     applyZoom()
   }
 
@@ -1562,8 +1614,6 @@
         el.main.appendChild(wrap)
         el.status.textContent = ''
         document.title = 'OpenMuse'
-        var zb = document.getElementById('zoom')
-        if (zb) zb.style.display = 'none'
         return
       }
 

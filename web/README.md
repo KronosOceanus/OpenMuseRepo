@@ -66,6 +66,8 @@ fix-tempo.py        把非四分音符的速度记号换算成等价的四分音
 list-pieces.py      列出所有曲子的声部 / 音色 / 小节数
 diff-musicxml.py    比两个 MusicXML → 差异清单（对比模式用）
 merge-musicxml.py   把两份 MusicXML 拼成一份（不经过 MuseScore）
+build-compare.py    一条命令做对照（转谱 → 修速度 → 配对 → 出清单）
+make-demo-changes.py 造演示用的「改后」版本
 pieces.json         曲目清单
 pieces/             MusicXML
 vendor/             AlphaTab / 音源 / 乐谱字体
@@ -88,22 +90,41 @@ vendor/             AlphaTab / 音源 / 乐谱字体
 同一首曲子有两个版本（不同人扒的、或者你自己改的），左右并排看差异。
 **改动处标红（原版）／标绿（改后）**，像 GitHub 的 diff，只是长在乐谱上。
 
-### 怎么生成
+### 怎么生成 —— 一条命令
 
 ```bash
-# ① 造一份「改后」版本（演示用；真实场景里这就是别人发来的谱）
-python3 make-demo-changes.py pieces/曲子.musicxml pieces/曲子-mod.musicxml 8
-
-# ② 出差异清单
-python3 diff-musicxml.py pieces/曲子.musicxml pieces/曲子-mod.musicxml \
-        -o pieces/曲子.diff.json
-
-# ③ pieces.json 里加两个字段
-#   "compareFile": "pieces/曲子-mod.musicxml",
-#   "compare":     "pieces/曲子.diff.json"
+python3 build-compare.py 版本A.mscz 版本B.mscz 对比id ["标题"]
 ```
 
-打开 `?piece=<id>` 就是左右并排。
+它把整条流程串好了：
+
+```
+① 两边都转 MusicXML（.mscz/.mscx 走 MuseScore；已是 MusicXML 就直接用）
+② **跑 fix-tempo.py**   ← 手工做时漏过这一步，结果一边播出来慢一倍
+③ 声部按【名字】配对，出差异清单
+④ 更新 pieces.json
+⑤ 报告配上了哪些声部、哪些没配上、小节数是否一致
+```
+
+### 做演示样本
+
+想造一份「改后」版本看效果（而不是拿真实的两个版本）：
+
+```bash
+python3 make-demo-changes.py pieces/曲子.musicxml pieces/曲子-mod.musicxml 8
+```
+
+自动挑「本来就有 ≥3 个音」的小节、沿全曲均匀分布、每处改 2-3 个音、
+移调量控制在音域内。
+
+### 声部是**按名字**配对的
+
+不按下标。实测同一首曲子的不同编配版本声部数可以差很多 ——
+`moonlight melody` 的三个版本分别是 **14 / 4 / 1** 个 part，
+而它们共有的双簧管在两个文件里是**第 0 位和第 6 位**。
+按下标比会拿双簧管去比长笛。
+
+配不上的声部会列出来，跳过不比较。
 
 ### 页面上的行为
 

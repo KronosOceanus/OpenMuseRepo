@@ -155,7 +155,7 @@ def part_display_names(root):
     return names
 
 
-def build_diff(path_a, path_b=None):
+def build_diff(path_a, path_b=None, label_a=None, label_b=None):
     """比两个版本。path_b 省略时，path_a 必须是含 2 个 part 的合并谱。"""
     root_a = ET.parse(path_a).getroot()
 
@@ -188,32 +188,59 @@ def build_diff(path_a, path_b=None):
         pb = root_b.findall('part')
         if not pa or not pb:
             raise SystemExit('  ❌ 有文件里找不到 <part>')
-        if len(pa) != len(pb):
-            raise SystemExit(
-                f'  ❌ 两个文件声部数不同：{len(pa)} vs {len(pb)}\n'
-                f'     逐 part 对齐要求声部数一致。'
-            )
-
         na = part_display_names(root_a)
         nb = part_display_names(root_b)
         # ⚠️ 这里**不能**用 pa[0] 的名字当整份文件的标签。
         #    多乐器谱里那只是第一件乐器（比如「小号（Bb）」），
         #    结果左右两栏的标题都变成「小号（Bb）」，看着像少了一栏。
-        base_name = '原版'
-        head_name = '改后'
+        base_name = label_a or '原版'
+        head_name = label_b or '改后'
         src = os.path.basename(path_a) + ' ↔ ' + os.path.basename(path_b)
+
+        # ── 声部按【名字】配对，不按下标 ──────────────────────────
+        #
+        # 下标配对要求两个文件声部数一致、顺序也一致。实测同一首曲子的
+        # 不同编配版本根本不满足 —— 例：moonlight melody 的三个版本是
+        # 14 / 4 / 1 个 part，而它们共有的双簧管 / 单簧管 / 大管在文件的
+        # 第 7、8、9 位 vs 第 0、1、2 位。按下标比会拿双簧管去比长笛。
+        #
+        # 所以按 <part-name> 配对。名字对不上的声部就跳过，并记下来。
+        idx_a_by_name = {}
+        for i, p in enumerate(pa):
+            nm = na.get(p.get('id'), '').strip()
+            if nm:
+                idx_a_by_name.setdefault(nm, i)
+        idx_b_by_name = {}
+        for i, p in enumerate(pb):
+            nm = nb.get(p.get('id'), '').strip()
+            if nm:
+                idx_b_by_name.setdefault(nm, i)
+
+        matched = []
+        for nm, ia in idx_a_by_name.items():
+            if nm in idx_b_by_name:
+                matched.append((nm, ia, idx_b_by_name[nm]))
+        matched.sort(key=lambda x: x[1])
+        unmatched_a = sorted(set(idx_a_by_name) - set(idx_b_by_name))
+        unmatched_b = sorted(set(idx_b_by_name) - set(idx_a_by_name))
+
+        if not matched:
+            raise SystemExit(
+                '  ❌ 两个文件里没有一个声部的名字对得上，无法配对。\n'
+                f'     文件A：{", ".join(sorted(idx_a_by_name)[:6])}…\n'
+                f'     文件B：{", ".join(sorted(idx_b_by_name)[:6])}…'
+            )
 
         items = []
         total_common = 0
         truncated = False
-        for ti in range(len(pa)):
-            ma_i = pa[ti].findall('measure')
-            mb_i = pb[ti].findall('measure')
+        for nm, ia, ib in matched:
+            ma_i = pa[ia].findall('measure')
+            mb_i = pb[ib].findall('measure')
             common_i = min(len(ma_i), len(mb_i))
             total_common = max(total_common, common_i)
             if len(ma_i) != len(mb_i):
                 truncated = True
-            didx = 1
             div_a = div_b = 1
             for i in range(common_i):
                 da = ma_i[i].findtext('attributes/divisions')
@@ -240,18 +267,24 @@ def build_diff(path_a, path_b=None):
                 items.append({
                     'index': i,
                     'number': ma_i[i].get('number', str(i + 1)),
-                    'track': ti,
-                    'trackName': na.get(pa[ti].get('id'), 'P' + str(ti + 1)),
+                    'trackA': ia,          # 左边（基准）里的声部下标
+                    'trackB': ib,          # 右边（对比）里的声部下标
+                    'trackName': nm,
                     'removed': pack2(removed),
                     'added': pack2(added),
                 })
 
-        items.sort(key=lambda x: (x['index'], x['track']))
+        items.sort(key=lambda x: (x['index'], x['trackA']))
         return {
             'base': base_name,
             'head': head_name,
             'source': src,
-            'parts': len(pa),
+            'partsA': len(pa),
+            'partsB': len(pb),
+            'parts': len(pa),              # 兼容旧字段
+            'matched': [{'name': n, 'trackA': a, 'trackB': b} for n, a, b in matched],
+            'unmatchedA': unmatched_a,
+            'unmatchedB': unmatched_b,
             'measureCount': total_common,
             'truncated': truncated,
             'diffCount': len(items),
@@ -338,6 +371,8 @@ def main():
     ap.add_argument('musicxml', help='A 的 MusicXML；若给第二个参数则比两份文件')
     ap.add_argument('musicxml_b', nargs='?', default=None, help='B 的 MusicXML（可选）')
     ap.add_argument('-o', '--out', default=None)
+    ap.add_argument('--label-a', default=None, help='左侧标签（默认「原版」）')
+    ap.add_argument('--label-b', default=None, help='右侧标签（默认「改后」）')
     ap.add_argument('--text', action='store_true', help='只打印，不写文件')
     args = ap.parse_args()
 
@@ -346,7 +381,7 @@ def main():
     if args.musicxml_b and not os.path.isfile(args.musicxml_b):
         raise SystemExit(f'  ❌ 找不到 {args.musicxml_b}')
 
-    d = build_diff(args.musicxml, args.musicxml_b)
+    d = build_diff(args.musicxml, args.musicxml_b, args.label_a, args.label_b)
 
     if args.text:
         print(render_text(d))
