@@ -5,6 +5,10 @@
 ```
 index.html          页面本体（就这一个文件）
 serve.py            本地预览服务（带 no-cache，避免改了看不到）
+docs/               调研笔记
+                    musescore-scorediff-notes.md
+                    —— MuseScore 自带的谱面对比是怎么实现的（文本 diff + 双游标
+                       映回元素 + 边界位移修正），以及我们能借鉴什么
 pieces.json         曲目清单
 pieces/             MusicXML 文件放这
 vendor/             AlphaTab / 音源 / 乐谱字体
